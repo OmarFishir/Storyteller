@@ -62,6 +62,11 @@ class SuggestRequest(BaseModel):
     premise: str
 
 
+class ExpandRequest(BaseModel):
+    scenario: str
+    instruction: str
+
+
 # ---------------------------------------------------------------------------
 # 3. The prompt
 # ---------------------------------------------------------------------------
@@ -78,6 +83,16 @@ Each option must be 1-2 sentences, vivid, and meaningfully different from the ot
 
 Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
 {"scenarios": ["option one", "option two", "option three"]}"""
+
+
+# Static instruction for /expand. Front-loaded and identical every call, same
+# caching-ready shape as SYSTEM_PROMPT. Unlike /suggest, the model returns plain
+# prose (one rewritten scenario), so there is NO JSON to parse.
+EXPAND_PROMPT = """You are a creative writing assistant for a story-building app.
+You will be given a single story scenario and an instruction for changing it.
+Rewrite the scenario to follow the instruction. Keep it vivid and self-contained.
+Respond with ONLY the rewritten scenario as plain prose — no preamble, no labels,
+no markdown, no quotes."""
 
 
 def parse_scenarios(raw_text: str) -> list[str]:
@@ -158,6 +173,17 @@ def suggest(req: SuggestRequest):
     )
     scenarios = parse_scenarios(text)
     return {"scenarios": scenarios}
+
+
+@app.post("/expand")
+def expand(req: ExpandRequest):
+    """Take a chosen scenario + an instruction, return the original alongside a rewrite."""
+    expanded = call_gemini(
+        f"{EXPAND_PROMPT}\n\nScenario: {req.scenario}\n\nInstruction: {req.instruction}",
+        max_tokens=600,
+        temperature=0.8,
+    )
+    return {"original": req.scenario, "expanded": expanded}
 
 
 # A trivial health check, handy for confirming the server is up.

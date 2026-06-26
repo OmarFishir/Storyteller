@@ -53,3 +53,24 @@ def test_suggest_returns_three_scenarios(monkeypatch):
     resp = client.post("/suggest", json={"premise": "a lost dog finds a door"})
     assert resp.status_code == 200
     assert resp.json()["scenarios"] == ["one", "two", "three"]
+
+
+def test_expand_returns_original_and_expanded(monkeypatch):
+    monkeypatch.setattr(
+        main, "call_gemini", lambda *a, **k: "A darker version of the scene."
+    )
+
+    resp = client.post(
+        "/expand",
+        json={"scenario": "A bright meadow at noon.", "instruction": "make it darker"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["original"] == "A bright meadow at noon."
+    assert data["expanded"] == "A darker version of the scene."
+    assert len(data["expanded"]) > 0
+
+
+def test_expand_rejects_missing_instruction():
+    resp = client.post("/expand", json={"scenario": "only the scenario"})
+    assert resp.status_code == 422  # Pydantic validation rejects missing field
