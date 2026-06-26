@@ -16,11 +16,13 @@ Then it lives at http://127.0.0.1:8000
 
 import os
 import json
+import time
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors
 
 # ---------------------------------------------------------------------------
 # 1. Load secrets
@@ -111,24 +113,50 @@ def parse_scenarios(raw_text: str) -> list[str]:
         )
 
 
+def call_gemini(contents: str, max_tokens: int, temperature: float) -> str:
+    """
+    Make ONE Gemini request, retrying transient server errors (5xx) with
+    exponential backoff (1s, 2s, 4s). Returns the model's text.
+
+    If the model is still unavailable after all retries, raises a clean
+    503 (HTTPException) instead of leaking a 500/stack trace. Both /suggest
+    and /expand call this, so retry logic lives in exactly one place.
+    """
+    delays = [1, 2, 4]  # waits between attempts; 3 retries after the first try
+    for attempt in range(len(delays) + 1):  # 4 attempts total
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+            return response.text
+        except errors.ServerError:
+            if attempt < len(delays):
+                time.sleep(delays[attempt])
+            # On the final attempt we fall through and raise below.
+
+    raise HTTPException(
+        status_code=503,
+        detail="The AI model is busy right now. Please try again in a moment.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 4. The endpoint
 # ---------------------------------------------------------------------------
 @app.post("/suggest")
 def suggest(req: SuggestRequest):
     """Take a premise, return 3 scenario options."""
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=f"{SYSTEM_PROMPT}\n\nPremise: {req.premise}",
-        config={
-            # max_output_tokens caps how long the answer can be. This is your
-            # biggest cost lever, because output tokens are the expensive ones.
-            "max_output_tokens": 300,
-            "temperature": 0.9,  # higher = more creative/varied
-        },
+    text = call_gemini(
+        f"{SYSTEM_PROMPT}\n\nPremise: {req.premise}",
+        max_tokens=300,
+        temperature=0.9,
     )
-
-    scenarios = parse_scenarios(response.text)
+    scenarios = parse_scenarios(text)
     return {"scenarios": scenarios}
 
 
