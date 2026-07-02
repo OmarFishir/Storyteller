@@ -1,0 +1,106 @@
+import { render, fireEvent, waitFor } from "@testing-library/react-native";
+import Story from "../story";
+import * as api from "../../lib/api";
+import type { StreamEvent } from "../../lib/sse";
+
+jest.mock("expo-router", () => ({
+  useLocalSearchParams: () => ({ templateId: "fantasy", premise: "A dragon egg hatches." }),
+  router: { back: jest.fn() },
+}));
+
+async function* fixtureStream(events: StreamEvent[]) {
+  for (const ev of events) yield ev;
+}
+
+describe("Story", () => {
+  it("streams the opening scene and then shows option cards", async () => {
+    const spy = jest.spyOn(api, "streamTurn").mockReturnValue(
+      fixtureStream([
+        { type: "token", t: "The egg " },
+        { type: "token", t: "cracked." },
+        { type: "turn_complete", summary: "s2", scenarios: ["Go north", "Go south"] },
+      ])
+    );
+
+    const { getByText } = render(<Story />);
+    await waitFor(() => expect(getByText(/cracked/)).toBeTruthy());
+    expect(getByText("Go north")).toBeTruthy();
+    expect(getByText("Go south")).toBeTruthy();
+    expect(spy).toHaveBeenCalledWith({
+      template_id: "fantasy",
+      summary: "A dragon egg hatches.",
+      chosen_scenario: "Open the story.",
+    });
+  });
+
+  it("tapping an option runs the next turn with the updated summary", async () => {
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Scene one." },
+          { type: "turn_complete", summary: "sum-1", scenarios: ["Option A"] },
+        ])
+      )
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Scene two." },
+          { type: "turn_complete", summary: "sum-2", scenarios: ["Option B"] },
+        ])
+      );
+
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText("Option A"));
+    fireEvent.press(getByText("Option A"));
+    await waitFor(() => getByText("Option B"));
+    expect(spy).toHaveBeenLastCalledWith({
+      template_id: "fantasy",
+      summary: "sum-1",
+      chosen_scenario: "Option A",
+    });
+    // scene one is still on screen (finished scenes persist)
+    expect(getByText(/Scene one/)).toBeTruthy();
+  });
+
+  it("keeps partial text and offers retry on a mid-stream error", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValue(
+      fixtureStream([
+        { type: "token", t: "Half a scene " },
+        { type: "stream_error", status: 503, detail: "busy" },
+      ])
+    );
+
+    const { getByText } = render(<Story />);
+    await waitFor(() => expect(getByText(/muse is busy/i)).toBeTruthy());
+    expect(getByText(/Half a scene/)).toBeTruthy(); // partial text preserved
+  });
+
+  it("shows the daily-quota message for 429 frames", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValue(
+      fixtureStream([{ type: "stream_error", status: 429, detail: "quota" }])
+    );
+    const { getByText } = render(<Story />);
+    await waitFor(() => expect(getByText(/out of muse for today/i)).toBeTruthy());
+  });
+
+  it("retry re-runs the same turn", async () => {
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(
+        fixtureStream([{ type: "stream_error", status: 503, detail: "busy" }])
+      )
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Fresh scene." },
+          { type: "turn_complete", summary: "s2", scenarios: ["A"] },
+        ])
+      );
+
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText(/tap to retry/i));
+    fireEvent.press(getByText(/tap to retry/i));
+    await waitFor(() => getByText(/Fresh scene/));
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0][0]).toEqual(spy.mock.calls[1][0]); // identical request
+  });
+});
