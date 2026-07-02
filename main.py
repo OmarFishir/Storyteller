@@ -1,13 +1,13 @@
 """
-Storyteller — v1 backend
-A tiny FastAPI server with ONE endpoint: POST /suggest
+Storyteller — backend
 
-What it does:
-  You send a story premise (a sentence or two).
-  It returns 3 short scenario options the writer can pick from.
-
-This is the *core loop* of the whole app. Everything else (expand,
-summary, the mobile UI) gets built on top of this once it works.
+FastAPI server for the AI-assisted choose-your-own-adventure builder. Endpoints:
+  POST /suggest          — premise -> 3 scenario options
+  POST /expand           — refine one chosen scenario per a plain-English instruction
+  POST /continue         — advance the story: scene + updated running summary + next options
+  POST /continue/stream  — SSE twin of /continue (word-by-word scene tokens);
+                            supports an env-gated mock mode for offline client work
+  GET  /templates        — genre templates the client can offer
 
 Run it locally with:
     uvicorn main:app --reload
@@ -18,6 +18,7 @@ import os
 import json
 import sys
 import time
+from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -238,8 +239,10 @@ def validate_turn_payload(raw_text: str) -> tuple[str, list[str]]:
             status_code=502,
             detail=f"Model JSON missing valid 'summary'. Raw: {raw_text[:300]}",
         )
-    if not isinstance(scenarios, list) or not all(
-        isinstance(s, str) for s in scenarios
+    if (
+        not isinstance(scenarios, list)
+        or len(scenarios) == 0
+        or not all(isinstance(s, str) for s in scenarios)
     ):
         raise HTTPException(
             status_code=502,
@@ -257,6 +260,13 @@ def get_template_or_404(template_id: str) -> dict:
             detail=f"Unknown template_id '{template_id}'. Valid ids: {sorted(TEMPLATES)}",
         )
     return template
+
+
+# User-facing detail strings shared by every place a Gemini call gives up:
+# call_gemini's exhausted-retry 503, call_gemini_stream's pre-first-byte 503,
+# its mid-stream 503, and both functions' 429 — one wording, one place to edit.
+DETAIL_MODEL_BUSY = "The AI model is busy right now. Please try again in a moment."
+DETAIL_QUOTA = "Daily AI quota reached. Please try again later."
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -311,7 +321,7 @@ def call_gemini(
                 # A daily quota cap — retrying with backoff cannot fix this.
                 raise HTTPException(
                     status_code=429,
-                    detail="Daily AI quota reached. Please try again later.",
+                    detail=DETAIL_QUOTA,
                 )
             raise
         except errors.ServerError:
@@ -321,13 +331,13 @@ def call_gemini(
 
     raise HTTPException(
         status_code=503,
-        detail="The AI model is busy right now. Please try again in a moment.",
+        detail=DETAIL_MODEL_BUSY,
     )
 
 
 def call_gemini_stream(
     contents: str, max_tokens: int, temperature: float, label: str = "unlabeled"
-):
+) -> Iterator[str]:
     """
     Streaming sibling of call_gemini: yields the model's text chunk by chunk
     as it is generated (feeds the client's word-by-word animation).
@@ -364,7 +374,7 @@ def call_gemini_stream(
             if getattr(e, "code", None) == 429:
                 raise HTTPException(
                     status_code=429,
-                    detail="Daily AI quota reached. Please try again later.",
+                    detail=DETAIL_QUOTA,
                 )
             raise
         except errors.ServerError:
@@ -373,7 +383,7 @@ def call_gemini_stream(
             else:
                 raise HTTPException(
                     status_code=503,
-                    detail="The AI model is busy right now. Please try again in a moment.",
+                    detail=DETAIL_MODEL_BUSY,
                 )
 
     yielded_any = False
@@ -388,6 +398,14 @@ def call_gemini_stream(
                 yielded_any = True
                 yield chunk.text
             chunk = next(stream, None)
+    except errors.ServerError:
+        # A 5xx after the first byte: can't retry (half a scene is already
+        # out), but it must still surface as a clean 503, not a raw SDK
+        # error — the finally below still runs to log whatever usage we saw.
+        raise HTTPException(
+            status_code=503,
+            detail=DETAIL_MODEL_BUSY,
+        )
     finally:
         try:
             usage_log.log_usage(
@@ -499,7 +517,13 @@ def _stream_turn(req: ContinueRequest, template: dict):
     except HTTPException as e:
         yield sse_event("error", {"status": e.status_code, "detail": e.detail})
     except Exception as e:
-        yield sse_event("error", {"status": 500, "detail": f"Unexpected error: {e}"})
+        # Never leak raw exception text to the client — log it server-side
+        # for debugging and send a generic, retryable message instead.
+        print(f"WARNING: unexpected streaming error: {e!r}", file=sys.stderr)
+        yield sse_event(
+            "error",
+            {"status": 500, "detail": "Something went wrong. Please retry the turn."},
+        )
 
 
 @app.post("/continue/stream")

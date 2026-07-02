@@ -415,6 +415,22 @@ def test_call_gemini_stream_empty_stream_502(monkeypatch):
     assert exc_info.value.status_code == 502
 
 
+def test_call_gemini_stream_midstream_server_error_maps_to_503(monkeypatch):
+    def chunks():
+        yield FakeChunk(text="First ")
+        raise errors.ServerError(503, {"error": {"message": "overloaded"}})
+
+    monkeypatch.setattr(
+        main.client.models, "generate_content_stream", lambda **k: chunks()
+    )
+
+    gen = main.call_gemini_stream("p", max_tokens=10, temperature=0.5, label="scene")
+    assert next(gen) == "First "
+    with pytest.raises(HTTPException) as exc_info:
+        next(gen)
+    assert exc_info.value.status_code == 503
+
+
 def test_call_gemini_stream_logs_on_early_close(monkeypatch):
     logged = []
     monkeypatch.setattr(main.usage_log, "log_usage", lambda **kw: logged.append(kw))
@@ -538,6 +554,42 @@ def test_stream_midstream_failure_keeps_sent_tokens(monkeypatch):
     assert events[0] == {"event": "scene_token", "data": {"t": "First words "}}
     assert events[-1]["event"] == "error"
     assert events[-1]["data"]["status"] == 503
+
+
+def test_stream_unexpected_error_sanitized_and_logged(monkeypatch, capsys):
+    def dies_after_one(contents, **kwargs):
+        yield "First words "
+        raise RuntimeError("secret internals")
+
+    monkeypatch.setattr(main, "call_gemini_stream", dies_after_one)
+
+    resp = client.post("/continue/stream", json=CONTINUE_BODY)
+    events = parse_sse(resp.text)
+    assert events[0] == {"event": "scene_token", "data": {"t": "First words "}}
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 500
+    assert "secret internals" not in events[-1]["data"]["detail"]
+    assert "retry" in events[-1]["data"]["detail"].lower()
+
+    captured = capsys.readouterr()
+    assert "secret internals" in captured.err
+    assert "unexpected streaming error" in captured.err
+
+
+def test_continue_502_when_scenarios_empty(monkeypatch):
+    responses = iter(["The scene prose.", '{"summary": "ok", "scenarios": []}'])
+    monkeypatch.setattr(
+        main, "call_gemini", lambda contents, **kw: next(responses)
+    )
+    resp = client.post(
+        "/continue",
+        json={
+            "template_id": "fantasy",
+            "summary": "s",
+            "chosen_scenario": "c",
+        },
+    )
+    assert resp.status_code == 502  # zero options is a dead end delivered as success
 
 
 def test_continue_still_validates_after_refactor(monkeypatch):
