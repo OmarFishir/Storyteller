@@ -43,4 +43,18 @@ describe("SSEParser", () => {
     const p = new SSEParser();
     expect(p.feed(frame("narration_started", { x: 1 }))).toEqual([]);
   });
+
+  it("handles the \\n\\n separator itself split across chunks", () => {
+    const p = new SSEParser();
+    const whole = frame("scene_token", { t: "x" });
+    expect(p.feed(whole.slice(0, whole.length - 1))).toEqual([]);
+    expect(p.feed(whole.slice(whole.length - 1))).toEqual([{ type: "token", t: "x" }]);
+  });
+
+  it("maps malformed JSON in a known event to stream_error 500", () => {
+    const p = new SSEParser();
+    expect(p.feed("event: scene_token\ndata: {not json}\n\n")).toEqual([
+      { type: "stream_error", status: 500, detail: "Malformed stream frame." },
+    ]);
+  });
 });

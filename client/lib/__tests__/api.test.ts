@@ -43,4 +43,32 @@ describe("streamTurn", () => {
       { type: "stream_error", status: 404, detail: "Unknown template_id" },
     ]);
   });
+
+  it("maps a mid-stream read failure into stream_error status 0", async () => {
+    let readCount = 0;
+    const fakeRes = {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () => {
+            readCount += 1;
+            if (readCount === 1) {
+              return Promise.resolve({
+                done: false,
+                value: new TextEncoder().encode('event: scene_token\ndata: {"t": "First "}\n\n'),
+              });
+            }
+            return Promise.reject(new Error("connection reset"));
+          },
+        }),
+      },
+    } as unknown as Response;
+    jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(fakeRes);
+
+    const events = [];
+    for await (const ev of streamTurn(REQ)) events.push(ev);
+    expect(events[0]).toEqual({ type: "token", t: "First " });
+    expect(events[events.length - 1]).toMatchObject({ type: "stream_error", status: 0 });
+  });
 });

@@ -53,14 +53,27 @@ export async function* streamTurn(body: TurnRequest): AsyncGenerator<StreamEvent
     return;
   }
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
   const parser = new SSEParser();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
+  try {
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
+        yield ev;
+      }
+    }
+    // Flush any buffered partial multi-byte character at stream end.
+    for (const ev of parser.feed(decoder.decode())) {
       yield ev;
     }
+  } catch {
+    // Mid-stream connection loss: same error channel as everything else.
+    yield {
+      type: "stream_error",
+      status: 0,
+      detail: "Connection lost mid-story. Tap to retry.",
+    };
   }
 }
