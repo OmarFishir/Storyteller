@@ -48,7 +48,8 @@
   "jest": {
     "preset": "jest-expo",
     "setupFilesAfterEnv": ["<rootDir>/jest-setup.js"],
-    "testPathIgnorePatterns": ["/node_modules/"]
+    "testPathIgnorePatterns": ["/node_modules/"],
+    "restoreMocks": true
   },
   "private": true
 }
