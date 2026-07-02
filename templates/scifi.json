@@ -1,0 +1,11 @@
+{
+  "id": "scifi",
+  "name": "Sci-Fi",
+  "description": "Strange futures, thinking machines, and space that doesn't care about you.",
+  "style": "Grounded science fiction tone. Ideas taken seriously with concrete sensory consequences; technology has rules and costs. Wonder and unease in equal measure. Avoid technobabble that resolves plot problems by magic.",
+  "premise_seeds": [
+    "A cargo hauler's navigation AI starts refusing routes it insists are 'already taken by us'.",
+    "The first colony ship arrives to find the planet already terraformed and one house standing.",
+    "A memory-backup technician finds a recording of their own death, timestamped next week."
+  ]
+}

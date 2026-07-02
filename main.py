@@ -25,6 +25,7 @@ from google import genai
 from google.genai import errors
 
 import usage_log
+import story_templates
 
 # ---------------------------------------------------------------------------
 # 1. Load secrets
@@ -51,6 +52,9 @@ client = genai.Client(api_key=API_KEY)
 # Keeping the model name in one constant means you swap providers/models in
 # exactly one place later — that's the "provider-agnostic" habit.
 MODEL = "gemini-2.5-flash-lite"
+
+# Genre templates, loaded once at startup. Fail-loud on malformed files.
+TEMPLATES = story_templates.load_templates()
 
 # ---------------------------------------------------------------------------
 # 2. The app
@@ -128,6 +132,17 @@ def parse_scenarios(raw_text: str) -> list[str]:
             status_code=502,
             detail=f"Model returned unparseable output ({e}). Raw: {raw_text[:300]}",
         )
+
+
+def get_template_or_404(template_id: str) -> dict:
+    """Look up a genre template; unknown ids get a clean 404 listing valid ones."""
+    template = TEMPLATES.get(template_id)
+    if template is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown template_id '{template_id}'. Valid ids: {sorted(TEMPLATES)}",
+        )
+    return template
 
 
 def call_gemini(
@@ -209,3 +224,19 @@ def expand(req: ExpandRequest):
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Storyteller API is running"}
+
+
+@app.get("/templates")
+def list_templates():
+    """Genre templates the client can offer. 'style' stays server-side (prompt material)."""
+    return {
+        "templates": [
+            {
+                "id": t["id"],
+                "name": t["name"],
+                "description": t["description"],
+                "premise_seeds": t["premise_seeds"],
+            }
+            for t in TEMPLATES.values()
+        ]
+    }

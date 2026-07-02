@@ -1,0 +1,11 @@
+{
+  "id": "noir",
+  "name": "Mystery / Noir",
+  "description": "Rain-slicked streets, unreliable clients, and truths nobody wants dug up.",
+  "style": "Hard-boiled noir tone. First-person-adjacent grit, terse sentences, dry wit. Clues matter: reference established facts and keep continuity of suspects, motives, and lies. Atmosphere over gore.",
+  "premise_seeds": [
+    "A private eye takes one last case: find who is sending the mayor photographs of a crime that officially never happened.",
+    "The city's best forger is found dead holding a painting everyone insists was never painted.",
+    "A detective's estranged partner reappears with amnesia and a briefcase neither of them can open."
+  ]
+}

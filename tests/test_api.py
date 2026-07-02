@@ -130,3 +130,14 @@ def test_call_gemini_survives_logging_failure(monkeypatch):
     )
 
     assert main.call_gemini("p", max_tokens=10, temperature=0.1) == "still works"
+
+
+def test_templates_endpoint_lists_genres_without_style():
+    resp = client.get("/templates")
+    assert resp.status_code == 200
+    templates = resp.json()["templates"]
+    ids = {t["id"] for t in templates}
+    assert {"fantasy", "noir", "scifi", "fairytale"} <= ids
+    for t in templates:
+        assert "style" not in t  # prompt material stays server-side
+        assert isinstance(t["premise_seeds"], list) and t["premise_seeds"]

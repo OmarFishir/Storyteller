@@ -1,0 +1,11 @@
+{
+  "id": "fantasy",
+  "name": "Fantasy Adventure",
+  "description": "Quests, magic, and wonder in a world where maps still have blank edges.",
+  "style": "High-fantasy adventure tone. Vivid sensory detail; a sense of wonder shadowed by real danger. Magic exists but always has a cost. Accessible language, forward momentum, no modern slang or anachronisms.",
+  "premise_seeds": [
+    "An apprentice mapmaker discovers the kingdom's maps are deliberately wrong about one forest.",
+    "A young shepherd finds a fallen star that whispers the names of people about to make terrible choices.",
+    "The last dragon egg hatches in a city where magic was outlawed a century ago."
+  ]
+}

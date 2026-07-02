@@ -1,0 +1,11 @@
+{
+  "id": "fairytale",
+  "name": "Fairy Tale (Bedtime)",
+  "description": "Gentle, cozy stories with warmth, wonder, and a soft landing — safe for bedtime.",
+  "style": "Gentle bedtime fairy-tale tone, safe for young children. Warm, cozy, wondrous. No violence, no death, no real fear — at most mild, quickly-resolved suspense. Kindness is rewarded. Always end each scene on a calm, reassuring note.",
+  "premise_seeds": [
+    "A small hedgehog inherits a lighthouse that only lights up when someone nearby needs a friend.",
+    "The moon loses one of her silver buttons in the deep forest, and the night animals organize a search.",
+    "A teapot in the village bakery starts brewing tea that tastes like your happiest memory."
+  ]
+}
