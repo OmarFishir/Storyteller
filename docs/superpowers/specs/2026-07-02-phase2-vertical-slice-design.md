@@ -57,6 +57,13 @@ event: turn_complete data: {"summary": "...", "scenarios": ["...","...","..."]}
 event: error         data: {"status": 429|502|503, "detail": "..."}   (terminal)
 ```
 
+Error frames ride over HTTP **200** (SSE headers are sent before the generator
+runs), so the client must parse frames rather than branch on HTTP status once
+streaming starts; only 404 (unknown template), 403 (mock gate), and 422
+(validation) arrive as plain HTTP errors. The status enum above is not
+closed: statuses outside {429, 503} (e.g. 500 from unexpected failures) must
+be treated as a generic retryable "something went wrong".
+
 - Scene call uses Gemini's **streaming** API (`generate_content_stream`) via a
   new `call_gemini_stream` sibling of `call_gemini` (same 429/5xx/empty-text
   handling philosophy, label `"scene"`). The scribe call stays non-streaming
@@ -91,6 +98,7 @@ event: error         data: {"status": 429|502|503, "detail": "..."}   (terminal)
   view, then 3 option cards; tapping one sends the next `/continue/stream`
   turn. Client state = `{templateId, summary, scenes[], options[]}` in plain
   React state (client carries the summary, exactly as the backend expects).
+- Do not hardcode exactly 3 option cards; render whatever count arrives.
 - **`StreamingText` component — the signature animation.** Consumes a token
   stream (any async source: live SSE, mock, or test fixture — it never knows
   about networking). Words materialize with a soft fade/rise as they arrive.
