@@ -155,12 +155,16 @@ def call_gemini(
                 },
             )
             usage = getattr(response, "usage_metadata", None)
-            usage_log.log_usage(
-                label=label,
-                model=MODEL,
-                input_tokens=(usage.prompt_token_count or 0) if usage else 0,
-                output_tokens=(usage.candidates_token_count or 0) if usage else 0,
-            )
+            try:
+                usage_log.log_usage(
+                    label=label,
+                    model=MODEL,
+                    input_tokens=(usage.prompt_token_count or 0) if usage else 0,
+                    output_tokens=(usage.candidates_token_count or 0) if usage else 0,
+                )
+            except Exception:
+                # The cost meter must never break the request it measures.
+                pass
             return response.text
         except errors.ServerError:
             if attempt < len(delays):

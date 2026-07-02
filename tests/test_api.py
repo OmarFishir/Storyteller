@@ -114,3 +114,19 @@ def test_call_gemini_logs_usage(monkeypatch):
     assert logged == [
         {"label": "scene", "model": main.MODEL, "input_tokens": 11, "output_tokens": 22}
     ]
+
+
+def test_call_gemini_survives_logging_failure(monkeypatch):
+    def boom(**kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(main.usage_log, "log_usage", boom)
+
+    class FakeResponse:
+        text = "still works"
+
+    monkeypatch.setattr(
+        main.client.models, "generate_content", lambda **k: FakeResponse()
+    )
+
+    assert main.call_gemini("p", max_tokens=10, temperature=0.1) == "still works"
