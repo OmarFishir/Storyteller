@@ -48,6 +48,46 @@ def test_call_gemini_raises_503_after_exhausting_retries(monkeypatch):
     assert exc_info.value.status_code == 503
 
 
+def test_call_gemini_raises_429_without_retrying(monkeypatch):
+    calls = {"n": 0}
+
+    def always_quota(**kwargs):
+        calls["n"] += 1
+        raise errors.ClientError(429, {"error": {"message": "quota exceeded"}})
+
+    monkeypatch.setattr(main.client.models, "generate_content", always_quota)
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.call_gemini("prompt", max_tokens=100, temperature=0.5)
+    assert exc_info.value.status_code == 429
+    assert calls["n"] == 1  # no retries — backoff cannot fix a daily cap
+
+
+def test_call_gemini_reraises_other_client_errors(monkeypatch):
+    def bad_request(**kwargs):
+        raise errors.ClientError(400, {"error": {"message": "bad request"}})
+
+    monkeypatch.setattr(main.client.models, "generate_content", bad_request)
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+
+    with pytest.raises(errors.ClientError):
+        main.call_gemini("prompt", max_tokens=100, temperature=0.5)
+
+
+def test_call_gemini_502s_on_empty_response(monkeypatch):
+    class FakeResponse:
+        text = None
+
+    monkeypatch.setattr(
+        main.client.models, "generate_content", lambda **k: FakeResponse()
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.call_gemini("prompt", max_tokens=100, temperature=0.5)
+    assert exc_info.value.status_code == 502
+
+
 def test_suggest_returns_three_scenarios(monkeypatch):
     fake_json = '{"scenarios": ["one", "two", "three"]}'
     monkeypatch.setattr(main, "call_gemini", lambda *a, **k: fake_json)
@@ -130,6 +170,25 @@ def test_call_gemini_survives_logging_failure(monkeypatch):
     )
 
     assert main.call_gemini("p", max_tokens=10, temperature=0.1) == "still works"
+
+
+def test_call_gemini_warns_on_logging_failure(monkeypatch, capsys):
+    def boom(**kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(main.usage_log, "log_usage", boom)
+
+    class FakeResponse:
+        text = "still works"
+
+    monkeypatch.setattr(
+        main.client.models, "generate_content", lambda **k: FakeResponse()
+    )
+
+    result = main.call_gemini("p", max_tokens=10, temperature=0.1)
+    assert result == "still works"
+    captured = capsys.readouterr()
+    assert "usage logging failed" in captured.err
 
 
 def test_templates_endpoint_lists_genres_without_style():

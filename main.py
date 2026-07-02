@@ -16,6 +16,7 @@ Then it lives at http://127.0.0.1:8000
 
 import os
 import json
+import sys
 import time
 
 from fastapi import FastAPI, HTTPException
@@ -218,10 +219,24 @@ def call_gemini(
                     input_tokens=(usage.prompt_token_count or 0) if usage else 0,
                     output_tokens=(usage.candidates_token_count or 0) if usage else 0,
                 )
-            except Exception:
-                # The cost meter must never break the request it measures.
-                pass
+            except Exception as e:
+                # The cost meter must never break the request it measures —
+                # but dying silently would hide that billing data stopped.
+                print(f"WARNING: usage logging failed: {e}", file=sys.stderr)
+            if not response.text:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Model returned an empty response. Try rephrasing or try again.",
+                )
             return response.text
+        except errors.ClientError as e:
+            if getattr(e, "code", None) == 429:
+                # A daily quota cap — retrying with backoff cannot fix this.
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily AI quota reached. Please try again later.",
+                )
+            raise
         except errors.ServerError:
             if attempt < len(delays):
                 time.sleep(delays[attempt])
