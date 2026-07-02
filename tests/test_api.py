@@ -428,3 +428,66 @@ def test_call_gemini_stream_logs_on_early_close(monkeypatch):
     gen.close()  # simulates client disconnect mid-stream
     assert len(logged) == 1  # best-effort log still happened (zero counts: no usage seen)
     assert logged[0]["label"] == "scene"
+
+
+# ============================================================================
+# SSE streaming and CORS tests
+# ============================================================================
+
+def parse_sse(body: str) -> list[dict]:
+    """Parse an SSE body into [{'event': ..., 'data': <parsed json>}, ...]."""
+    events = []
+    for block in body.strip().split("\n\n"):
+        ev = {"event": None, "data": None}
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                ev["event"] = line[len("event: "):]
+            elif line.startswith("data: "):
+                ev["data"] = jsonlib.loads(line[len("data: "):])
+        events.append(ev)
+    return events
+
+
+CONTINUE_BODY = {
+    "template_id": "fantasy",
+    "summary": "A knight seeks a dragon.",
+    "chosen_scenario": "She enters the cave.",
+}
+
+
+def test_mock_stream_requires_env_gate(monkeypatch):
+    monkeypatch.delenv("DEV_MOCK_ENABLED", raising=False)
+    resp = client.post("/continue/stream?mock=true", json=CONTINUE_BODY)
+    assert resp.status_code == 403
+
+
+def test_mock_stream_streams_canned_scene(monkeypatch):
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    monkeypatch.setattr("time.sleep", lambda *a: None)  # no real pacing in tests
+
+    resp = client.post("/continue/stream?mock=true", json=CONTINUE_BODY)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    events = parse_sse(resp.text)
+    assert events[0]["event"] == "scene_token"
+    assert events[-1]["event"] == "turn_complete"
+    # Reassembling every token yields exactly the canned scene.
+    scene = "".join(e["data"]["t"] for e in events if e["event"] == "scene_token")
+    assert scene == main.MOCK_SCENE
+    assert events[-1]["data"]["summary"] == main.MOCK_TURN["summary"]
+    assert len(events[-1]["data"]["scenarios"]) == 3
+
+
+def test_mock_stream_unknown_template_404(monkeypatch):
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    resp = client.post(
+        "/continue/stream?mock=true",
+        json={"template_id": "nope", "summary": "s", "chosen_scenario": "c"},
+    )
+    assert resp.status_code == 404
+
+
+def test_cors_headers_present():
+    resp = client.get("/templates", headers={"Origin": "http://localhost:8081"})
+    assert resp.headers.get("access-control-allow-origin") in ("*", "http://localhost:8081")

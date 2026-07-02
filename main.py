@@ -20,6 +20,8 @@ import sys
 import time
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
@@ -61,6 +63,16 @@ TEMPLATES = story_templates.load_templates()
 # 2. The app
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Storyteller API")
+
+# CORS lets the browser-based Expo dev loop (a different origin) call this API.
+# Wide-open is a DEV-ONLY stance — must be locked down before any public
+# exposure (roadmap Phase 6).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # A Pydantic "model" describes the shape of data we expect IN. FastAPI uses it
@@ -135,6 +147,43 @@ Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
 {"summary": "updated summary", "scenarios": ["option one", "option two", "option three"]}"""
 
 
+# --- Mock mode -------------------------------------------------------------
+# Streams a canned scene word-by-word with realistic pacing so the client's
+# animation can be built with ZERO Gemini calls (free, offline, deterministic
+# — it doubles as a test fixture). Gated by DEV_MOCK_ENABLED so it can never
+# exist in a production deploy.
+MOCK_SCENE = (
+    "The lantern guttered as Mira pressed her palm against the cold iron door. "
+    "Somewhere beyond it, water dripped in slow, deliberate beats, like something "
+    "counting.\n\nShe had been warned about the lower stacks — every apprentice "
+    "was — but the map in her satchel showed a corridor that should not exist, "
+    "and Mira had never once managed to leave a wrong map uncorrected."
+)
+
+MOCK_TURN = {
+    "summary": (
+        "Apprentice mapmaker Mira, investigating a corridor missing from the "
+        "kingdom's maps, stands before a cold iron door in the forbidden lower "
+        "stacks, drawn by her compulsion to correct wrong maps."
+    ),
+    "scenarios": [
+        "Mira forces the iron door and finds a room where maps draw themselves.",
+        "A voice behind the door asks her, by name, to slide the map underneath.",
+        "The dripping stops — and footsteps begin, approaching from the corridor that shouldn't exist.",
+    ],
+}
+
+
+def _stream_mock():
+    """Yield the canned scene word-by-word, then the canned turn_complete."""
+    words = MOCK_SCENE.split(" ")
+    for i, word in enumerate(words):
+        token = word if i == len(words) - 1 else word + " "
+        yield sse_event("scene_token", {"t": token})
+        time.sleep(0.03)  # realistic pacing for animation work; patched in tests
+    yield sse_event("turn_complete", MOCK_TURN)
+
+
 def parse_model_json(raw_text: str) -> dict:
     """
     Models sometimes wrap JSON in ```json fences or add stray text, even when
@@ -185,6 +234,11 @@ def get_template_or_404(template_id: str) -> dict:
             detail=f"Unknown template_id '{template_id}'. Valid ids: {sorted(TEMPLATES)}",
         )
     return template
+
+
+def sse_event(event: str, data: dict) -> str:
+    """One Server-Sent Events frame: 'event' names it, 'data' is one JSON line."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def call_gemini(
@@ -403,6 +457,25 @@ def continue_story(req: ContinueRequest):
             detail=f"Model JSON missing valid 'scenarios'. Raw: {raw[:300]}",
         )
     return {"scene": scene, "summary": summary, "scenarios": scenarios}
+
+
+@app.post("/continue/stream")
+def continue_story_stream(req: ContinueRequest, mock: bool = False):
+    """Streaming twin of /continue: scene tokens as SSE, then the folded turn."""
+    # Validation happens BEFORE streaming starts, so it's a normal HTTP error.
+    get_template_or_404(req.template_id)
+
+    if mock:
+        if os.environ.get("DEV_MOCK_ENABLED") != "1":
+            raise HTTPException(
+                status_code=403,
+                detail="Mock mode is disabled. Set DEV_MOCK_ENABLED=1 in .env for development.",
+            )
+        return StreamingResponse(_stream_mock(), media_type="text/event-stream")
+
+    raise HTTPException(status_code=501, detail="Real streaming lands in the next task.")
+    # ^ deliberate one-task placeholder: Task 3 replaces this line with the
+    #   real streaming path. Kept explicit so the increment is honest.
 
 
 # A trivial health check, handy for confirming the server is up.
