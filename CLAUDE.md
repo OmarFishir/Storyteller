@@ -158,10 +158,12 @@ FastAPI server in `main.py`:
   chunk by chunk via `generate_content_stream`, for `/continue/stream`'s scene
   call. Retry/backoff (5xx) and the clean 429 apply only BEFORE the first
   chunk — a generator, so those raise on first `next()`, not at call time; once
-  a chunk has been yielded, later failures are the caller's problem (can't
-  un-send half a scene). Usage is logged once the stream ends, in a `finally`
-  block, so a mid-stream failure or client disconnect still records whatever
-  usage was seen by then (best-effort, never zero silently swallowed).
+  a chunk has been yielded, a mid-stream 5xx is mapped to a clean
+  `HTTPException(503)` (→ a clean 503 error frame downstream, not a raw-text
+  500 — final-review fix, live-verified failure mode). Usage is logged once the
+  stream ends, in a `finally` block, so a mid-stream failure or client
+  disconnect still records whatever usage was seen by then. User-facing detail
+  strings live in the `DETAIL_MODEL_BUSY` / `DETAIL_QUOTA` constants.
 - `usage_log.log_usage(label, model, input_tokens, output_tokens)` — appends one
   JSON line per Gemini call to `logs/usage.jsonl` (git-ignored). Labels in use:
   `suggest`, `expand`, `scene`, `fold`. A logging failure is swallowed (it must
@@ -169,7 +171,7 @@ FastAPI server in `main.py`:
   visible. The whole "dashboard" for now is opening the file.
 
 Tests in `tests/test_api.py` and `tests/test_templates.py` (pytest + FastAPI
-`TestClient`, **42 tests**): health check; retry-then-succeed and
+`TestClient`, **45 tests**): health check; retry-then-succeed and
 retry-exhaustion → 503; 429-without-retry and other-4xx passthrough; empty-response
 → 502; /suggest shape bare and with `template_id` (404 on unknown; prompt ORDER
 pinned: static prompt → genre style → premise, the caching contract); /expand
