@@ -6,9 +6,10 @@ import { StreamingText } from "../components/StreamingText";
 
 type StreamError = { status: number; detail: string };
 
-function errorMessage(status: number): string {
-  if (status === 429) return "Out of muse for today. Try again tomorrow.";
-  if (status === 503) return "The muse is busy — tap to retry.";
+function errorMessage(error: StreamError): string {
+  if (error.status === 429) return "Out of muse for today. Try again tomorrow.";
+  if (error.status === 503) return "The muse is busy — tap to retry.";
+  if (error.status === 0) return error.detail;
   return "Something went wrong — tap to retry.";
 }
 
@@ -105,7 +106,7 @@ export default function Story() {
             <Text style={styles.sceneText}>{currentScene}</Text>
           )}
           <Pressable onPress={handleRetry} style={styles.retry}>
-            <Text style={styles.retryText}>{errorMessage(error.status)}</Text>
+            <Text style={styles.retryText}>{errorMessage(error)}</Text>
           </Pressable>
         </View>
       )}

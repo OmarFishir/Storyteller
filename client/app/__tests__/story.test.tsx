@@ -83,6 +83,16 @@ describe("Story", () => {
     await waitFor(() => expect(getByText(/out of muse for today/i)).toBeTruthy());
   });
 
+  it("shows the connection-loss detail for status-0 errors", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValue(
+      fixtureStream([
+        { type: "stream_error", status: 0, detail: "Connection lost mid-story. Tap to retry." },
+      ])
+    );
+    const { getByText } = render(<Story />);
+    await waitFor(() => expect(getByText(/connection lost mid-story/i)).toBeTruthy());
+  });
+
   it("retry re-runs the same turn", async () => {
     const spy = jest
       .spyOn(api, "streamTurn")

@@ -30,6 +30,7 @@ function parseBlock(block: string): StreamEvent | null {
   let data = "";
   for (const line of block.split("\n")) {
     if (line.startsWith("event: ")) event = line.slice(7);
+    // Last "data:" line wins — the backend emits single-line JSON payloads only.
     else if (line.startsWith("data: ")) data = line.slice(6);
   }
   try {
