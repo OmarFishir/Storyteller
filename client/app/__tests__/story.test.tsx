@@ -103,4 +103,48 @@ describe("Story", () => {
     expect(spy).toHaveBeenCalledTimes(2);
     expect(spy.mock.calls[0][0]).toEqual(spy.mock.calls[1][0]); // identical request
   });
+
+  it("ignores a second tap while a turn is already streaming", async () => {
+    let releaseFirst: () => void;
+    const firstTurnGate = new Promise<void>((res) => (releaseFirst = res));
+
+    async function* slowFirstTurn(): AsyncGenerator<StreamEvent> {
+      // Hold open until released — no events yet
+      await firstTurnGate;
+      yield { type: "token", t: "Scene one." };
+      yield { type: "turn_complete", summary: "sum-1", scenarios: ["Option A"] };
+    }
+
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Opening." },
+          { type: "turn_complete", summary: "s1", scenarios: ["Tap me"] },
+        ])
+      )
+      .mockReturnValueOnce(slowFirstTurn())
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Should never appear." },
+          { type: "turn_complete", summary: "x", scenarios: ["Y"] },
+        ])
+      );
+
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText("Tap me"));
+
+    // Capture button, then press twice synchronously
+    const btn = getByText("Tap me");
+    fireEvent.press(btn);
+    fireEvent.press(btn);
+
+    // Release the slow stream to let it complete
+    releaseFirst!();
+    await waitFor(() => getByText("Option A"));
+
+    // With streaming guard fix: only 2 calls (mount + first tap; second tap ignored)
+    // This test confirms the guard prevents overlapping streams
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
 });

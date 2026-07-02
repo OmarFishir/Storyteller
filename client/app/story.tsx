@@ -27,28 +27,37 @@ export default function Story() {
   const [turnCount, setTurnCount] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const startedRef = useRef(false);
+  const streamingRef = useRef(false);
 
   async function runTurn(req: TurnRequest) {
-    setError(null);
-    setCurrentScene("");
-    setOptions([]);
-    setPendingTurn(req);
-    setTurnCount((n) => n + 1);
+    // Guard against overlapping turns
+    if (streamingRef.current) return;
+    streamingRef.current = true;
 
-    let sceneText = "";
-    for await (const ev of streamTurn(req)) {
-      if (ev.type === "token") {
-        sceneText += ev.t;
-        setCurrentScene(sceneText);
-      } else if (ev.type === "turn_complete") {
-        setScenes((prev) => [...prev, sceneText]);
-        setCurrentScene("");
-        setSummary(ev.summary);
-        setOptions(ev.scenarios);
-        setPendingTurn(null);
-      } else if (ev.type === "stream_error") {
-        setError({ status: ev.status, detail: ev.detail });
+    try {
+      setError(null);
+      setCurrentScene("");
+      setOptions([]);
+      setPendingTurn(req);
+      setTurnCount((n) => n + 1);
+
+      let sceneText = "";
+      for await (const ev of streamTurn(req)) {
+        if (ev.type === "token") {
+          sceneText += ev.t;
+          setCurrentScene(sceneText);
+        } else if (ev.type === "turn_complete") {
+          setScenes((prev) => [...prev, sceneText]);
+          setCurrentScene("");
+          setSummary(ev.summary);
+          setOptions(ev.scenarios);
+          setPendingTurn(null);
+        } else if (ev.type === "stream_error") {
+          setError({ status: ev.status, detail: ev.detail });
+        }
       }
+    } finally {
+      streamingRef.current = false;
     }
   }
 
