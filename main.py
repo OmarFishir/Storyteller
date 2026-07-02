@@ -66,6 +66,7 @@ app = FastAPI(title="Storyteller API")
 # to automatically validate the request body and reject bad input for you.
 class SuggestRequest(BaseModel):
     premise: str
+    template_id: str | None = None
 
 
 class ExpandRequest(BaseModel):
@@ -205,9 +206,16 @@ def call_gemini(
 # ---------------------------------------------------------------------------
 @app.post("/suggest")
 def suggest(req: SuggestRequest):
-    """Take a premise, return 3 scenario options."""
+    """Take a premise (optionally genre-styled), return 3 scenario options."""
+    style_block = ""
+    if req.template_id is not None:
+        template = get_template_or_404(req.template_id)
+        style_block = f"\n\nGenre style:\n{template['style']}"
+
+    # Ordering matters for future prompt caching: static SYSTEM_PROMPT first,
+    # semi-static genre style second, dynamic premise last.
     text = call_gemini(
-        f"{SYSTEM_PROMPT}\n\nPremise: {req.premise}",
+        f"{SYSTEM_PROMPT}{style_block}\n\nPremise: {req.premise}",
         max_tokens=300,
         temperature=0.9,
         label="suggest",

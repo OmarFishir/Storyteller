@@ -152,3 +152,22 @@ def test_parse_model_json_rejects_non_object_with_502():
     with pytest.raises(HTTPException) as exc_info:
         main.parse_model_json('["just", "a", "list"]')
     assert exc_info.value.status_code == 502
+
+
+def test_suggest_with_template_injects_style(monkeypatch):
+    captured = {}
+
+    def fake_call_gemini(contents, **kwargs):
+        captured["contents"] = contents
+        return '{"scenarios": ["one", "two", "three"]}'
+
+    monkeypatch.setattr(main, "call_gemini", fake_call_gemini)
+    resp = client.post("/suggest", json={"premise": "a heist", "template_id": "noir"})
+    assert resp.status_code == 200
+    assert main.TEMPLATES["noir"]["style"] in captured["contents"]
+
+
+def test_suggest_rejects_unknown_template(monkeypatch):
+    monkeypatch.setattr(main, "call_gemini", lambda *a, **k: "unused")
+    resp = client.post("/suggest", json={"premise": "x", "template_id": "nope"})
+    assert resp.status_code == 404
