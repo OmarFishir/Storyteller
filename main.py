@@ -101,14 +101,14 @@ Respond with ONLY the rewritten scenario as plain prose — no preamble, no labe
 no markdown, no quotes."""
 
 
-def parse_scenarios(raw_text: str) -> list[str]:
+def parse_model_json(raw_text: str) -> dict:
     """
     Models sometimes wrap JSON in ```json fences or add stray text, even when
-    told not to. This cleans that up, then parses. If anything is still wrong,
-    we raise a clear error instead of crashing or returning garbage.
+    told not to. Strip that, parse, and require a JSON object. On anything
+    else, raise a clean 502 carrying the raw text (visible while developing;
+    in production you'd log it instead).
     """
     cleaned = raw_text.strip()
-    # Strip code fences if the model added them anyway.
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
         # After stripping backticks a leading "json" word can remain.
@@ -118,20 +118,28 @@ def parse_scenarios(raw_text: str) -> list[str]:
 
     try:
         data = json.loads(cleaned)
-        scenarios = data["scenarios"]
-        # Basic sanity checks: it must be a list of strings.
-        if not isinstance(scenarios, list) or not all(
-            isinstance(s, str) for s in scenarios
-        ):
-            raise ValueError("scenarios was not a list of strings")
-        return scenarios
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
-        # We surface the raw model text so YOU can see what went wrong while
-        # developing. In production you'd log this, not return it.
+        if not isinstance(data, dict):
+            raise ValueError("top-level JSON was not an object")
+        return data
+    except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Model returned unparseable output ({e}). Raw: {raw_text[:300]}",
         )
+
+
+def parse_scenarios(raw_text: str) -> list[str]:
+    """Validate the /suggest shape: {"scenarios": [str, str, str]}."""
+    data = parse_model_json(raw_text)
+    scenarios = data.get("scenarios")
+    if not isinstance(scenarios, list) or not all(
+        isinstance(s, str) for s in scenarios
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'scenarios'. Raw: {raw_text[:300]}",
+        )
+    return scenarios
 
 
 def get_template_or_404(template_id: str) -> dict:

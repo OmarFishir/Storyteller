@@ -141,3 +141,14 @@ def test_templates_endpoint_lists_genres_without_style():
     for t in templates:
         assert "style" not in t  # prompt material stays server-side
         assert isinstance(t["premise_seeds"], list) and t["premise_seeds"]
+
+
+def test_parse_model_json_strips_fences_and_returns_dict():
+    raw = '```json\n{"summary": "s", "scenarios": ["a"]}\n```'
+    assert main.parse_model_json(raw) == {"summary": "s", "scenarios": ["a"]}
+
+
+def test_parse_model_json_rejects_non_object_with_502():
+    with pytest.raises(HTTPException) as exc_info:
+        main.parse_model_json('["just", "a", "list"]')
+    assert exc_info.value.status_code == 502
