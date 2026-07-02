@@ -5,16 +5,21 @@ self-loading version of the project handoff. Keep it current as the project grow
 
 ## What this project is
 
-**Storyteller** is an AI-assisted, choose-your-own-adventure story builder. Core loop:
+**Storyteller** is a **voice-chat-first**, AI-assisted story maker. The user
+*talks* to a storyteller; it narrates back with an expressive voice while the
+story text animates on screen. The user steers the plot by voice, starting from
+genre templates. Two turn modes, user-selectable per session: push-to-talk
+(walkie-talkie) and hands-free interruptible (barge-in). Core story loop:
 
-1. User gives a story premise.
+1. User picks a genre template and gives/speaks a premise.
 2. AI suggests 3 short, distinct next-scenario options.
-3. User picks one, optionally expands/edits it.
-4. AI folds the choice into the running story and suggests the next 3 options.
+3. User picks one by voice, optionally expands/edits it by voice.
+4. AI folds the choice into the running story (summary), narrates, suggests next 3.
 5. Repeat.
 
-v1 wedge is **general creative fiction** (kept broad on purpose). It's a personal
-learning + portfolio project.
+It's a personal learning + portfolio project. Full roadmap (approved 2026-07-02):
+`docs/superpowers/specs/2026-07-02-voice-first-roadmap.md` — READ IT before
+planning any new feature work.
 
 ## Goals, in priority order
 
@@ -47,10 +52,25 @@ engineering is the point.
 - **LLM provider:** Google Gemini, model `gemini-2.5-flash-lite` (cheapest tier).
   Kept in ONE constant `MODEL` in `main.py` so providers/models swap in one place.
   Developed against the free Google AI Studio tier.
-- **Frontend (LATER):** React Native via Expo. NOT built yet.
+- **Frontend:** React Native via **Expo with web preview** — one codebase,
+  iterate in a browser tab, run the same code on the phone via Expo Go. The
+  client is CENTRAL to this product (voice + animations), not an afterthought —
+  it arrives in roadmap Phase 2 as a thin vertical slice.
 - **Architecture rule (critical):** the API key NEVER lives in the mobile app.
   Flow is: mobile app → our FastAPI backend (holds key) → Gemini. The backend is
   mandatory because anything shipped to a phone can be cracked open.
+
+## Four architecture rules for the voice-first build (every phase)
+
+1. **Streaming everywhere.** Text animations need words as they're generated.
+   Every new backend endpoint streams (Server-Sent Events).
+2. **Abortable audio from day one.** All narration playback must be stoppable
+   mid-word — hands-free barge-in depends on it; retrofitting = rewrite.
+3. **Voice behind an abstraction.** Thin `VoiceIn`/`VoiceOut` interfaces; never
+   call a speech service directly. Web vs phone, cheap vs expressive voices —
+   all swappable (same philosophy as the `MODEL` constant).
+4. **Cost meter from the start.** Log tokens (later: audio seconds) per request
+   per story. You can't cap what you can't see.
 
 ## Cost philosophy (the spine)
 
@@ -64,6 +84,13 @@ IF free usage is capped. Cost levers, in order of impact:
 3. **Prompt caching:** static template/system text is identical every call; cached
    input is ~10x cheaper. Put static text at the front. (NOT built yet.)
 4. **Cap output length** via `max_output_tokens` — output tokens cost 3–8x input.
+5. **Voice costs (new with voice-first):** text-to-speech bills per character,
+   realtime voice APIs bill per audio minute. Same discipline applies: meter it,
+   cap it, make paying users carry it.
+
+**Dev budget: up to ~$20/month.** Free tiers are the floor; one paid experiment
+at a time (quality TTS voice, paid Gemini tier when free-tier 503s block work).
+Verify current prices at each phase's design — never from memory.
 
 ## What's BUILT and WORKING
 
@@ -104,19 +131,26 @@ Under git (local only, branch `master`, no remote yet).
 - Run server: `uvicorn main:app --reload`. Test UI: `http://127.0.0.1:8000/docs`.
 - Run tests: `venv\Scripts\python.exe -m pytest tests/ -v`.
 
-## NEXT STEPS (priority order)
+## NEXT STEPS — follow the roadmap
 
-1. **Running summary system** — the big cost-control piece. After a scenario is
-   accepted, maintain a compact summary of the story-so-far; send summary + current
-   scene instead of full history. Simplest v1: return summary to the client and have
-   it pass it back each turn (keeps the backend stateless).
-2. **Prompt caching** for the static SYSTEM_PROMPT / EXPAND_PROMPT text.
-3. **Per-user quota / rate limiting** before any public exposure (a single runaway
-   user is the real bill risk).
-4. **GitHub remote** — push `master` for backup + portfolio visibility.
-5. **React Native (Expo) app** — chat-style UI: tappable scenario cards, an edit box,
-   a running-story view. Should handle 503 gracefully ("muse is busy, tap to retry").
-   Built LAST.
+The approved phase plan lives in
+`docs/superpowers/specs/2026-07-02-voice-first-roadmap.md`. Summary:
+
+1. **Phase 1 (NEXT): complete the story engine** — `/continue` running-summary
+   endpoint (client carries summary; stateless), genre template system v1
+   (~4 genres as data files, `GET /templates`), token/cost logging, GitHub remote.
+2. **Phase 2: vertical slice** — Expo app skeleton, streaming (SSE) story view
+   with animated text, push-to-talk on-device speech recognition, narration v1
+   (quality TTS ~$5 + device-TTS fallback), abortable playback.
+3. **Phase 3: product core** — story persistence (SQLite, story IDs), voice-driven
+   editing with morph animation, prompt caching, latency/failure UX.
+4. **Phase 4: expressive narration** — streamed audio, per-genre voices, loose sync.
+5. **Phase 5: hands-free mode** — barge-in via realtime voice API (evaluated fresh),
+   the turn-mode toggle.
+6. **Phase 6: money** — accounts, per-user quotas (tokens + audio seconds),
+   free tier + subscription (RevenueCat), TestFlight → App Store, content safety.
+
+Each phase gets its own brainstorm → spec → plan cycle when it starts.
 
 ## Concepts already covered (don't re-explain unless asked)
 
