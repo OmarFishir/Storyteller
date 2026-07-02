@@ -491,3 +491,58 @@ def test_mock_stream_unknown_template_404(monkeypatch):
 def test_cors_headers_present():
     resp = client.get("/templates", headers={"Origin": "http://localhost:8081"})
     assert resp.headers.get("access-control-allow-origin") in ("*", "http://localhost:8081")
+
+
+def test_stream_real_path_emits_tokens_then_turn_complete(monkeypatch):
+    def fake_stream(contents, **kwargs):
+        assert kwargs["label"] == "scene"
+        yield "Once "
+        yield "upon a time."
+
+    monkeypatch.setattr(main, "call_gemini_stream", fake_stream)
+    monkeypatch.setattr(
+        main,
+        "call_gemini",
+        lambda contents, **kw: '{"summary": "updated", "scenarios": ["a", "b", "c"]}',
+    )
+
+    resp = client.post("/continue/stream", json=CONTINUE_BODY)
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [e["event"] for e in events] == ["scene_token", "scene_token", "turn_complete"]
+    assert "".join(e["data"]["t"] for e in events[:2]) == "Once upon a time."
+    assert events[-1]["data"] == {"summary": "updated", "scenarios": ["a", "b", "c"]}
+
+
+def test_stream_scribe_garbage_becomes_error_frame(monkeypatch):
+    monkeypatch.setattr(main, "call_gemini_stream", lambda c, **kw: iter(["scene text"]))
+    monkeypatch.setattr(main, "call_gemini", lambda c, **kw: "not json at all")
+
+    resp = client.post("/continue/stream", json=CONTINUE_BODY)
+    assert resp.status_code == 200  # stream already started; error travels IN the stream
+    events = parse_sse(resp.text)
+    assert events[0]["event"] == "scene_token"
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 502
+
+
+def test_stream_midstream_failure_keeps_sent_tokens(monkeypatch):
+    def dies_after_one(contents, **kwargs):
+        yield "First words "
+        raise HTTPException(status_code=503, detail="model went away")
+
+    monkeypatch.setattr(main, "call_gemini_stream", dies_after_one)
+
+    resp = client.post("/continue/stream", json=CONTINUE_BODY)
+    events = parse_sse(resp.text)
+    assert events[0] == {"event": "scene_token", "data": {"t": "First words "}}
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 503
+
+
+def test_continue_still_validates_after_refactor(monkeypatch):
+    responses = iter(["scene", '{"summary": "", "scenarios": ["a", "b", "c"]}'])
+    monkeypatch.setattr(main, "call_gemini", lambda c, **kw: next(responses))
+
+    resp = client.post("/continue", json=CONTINUE_BODY)
+    assert resp.status_code == 502  # empty summary still rejected via shared helper

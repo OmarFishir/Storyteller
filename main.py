@@ -225,6 +225,29 @@ def parse_scenarios(raw_text: str) -> list[str]:
     return scenarios
 
 
+def validate_turn_payload(raw_text: str) -> tuple[str, list[str]]:
+    """
+    Validate the scribe's JSON: {"summary": non-empty str, "scenarios": [str, ...]}.
+    The ONE place this shape is checked — used by /continue and /continue/stream.
+    """
+    data = parse_model_json(raw_text)
+    summary = data.get("summary")
+    scenarios = data.get("scenarios")
+    if not isinstance(summary, str) or not summary.strip():
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'summary'. Raw: {raw_text[:300]}",
+        )
+    if not isinstance(scenarios, list) or not all(
+        isinstance(s, str) for s in scenarios
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'scenarios'. Raw: {raw_text[:300]}",
+        )
+    return summary, scenarios
+
+
 def get_template_or_404(template_id: str) -> dict:
     """Look up a genre template; unknown ids get a clean 404 listing valid ones."""
     template = TEMPLATES.get(template_id)
@@ -441,29 +464,49 @@ def continue_story(req: ContinueRequest):
         temperature=0.7,
         label="fold",
     )
-    data = parse_model_json(raw)
-    summary = data.get("summary")
-    scenarios = data.get("scenarios")
-    if not isinstance(summary, str) or not summary.strip():
-        raise HTTPException(
-            status_code=502,
-            detail=f"Model JSON missing valid 'summary'. Raw: {raw[:300]}",
-        )
-    if not isinstance(scenarios, list) or not all(
-        isinstance(s, str) for s in scenarios
-    ):
-        raise HTTPException(
-            status_code=502,
-            detail=f"Model JSON missing valid 'scenarios'. Raw: {raw[:300]}",
-        )
+    summary, scenarios = validate_turn_payload(raw)
     return {"scene": scene, "summary": summary, "scenarios": scenarios}
+
+
+def _stream_turn(req: ContinueRequest, template: dict):
+    """
+    The real streaming turn. Any failure after streaming has begun becomes a
+    terminal SSE error frame — the client keeps every token already shown.
+    """
+    try:
+        scene_parts: list[str] = []
+        token_iter = call_gemini_stream(
+            f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}\n\n"
+            f"Story so far:\n{req.summary}\n\n"
+            f"Chosen direction:\n{req.chosen_scenario}",
+            max_tokens=600,
+            temperature=0.9,
+            label="scene",
+        )
+        for token in token_iter:
+            scene_parts.append(token)
+            yield sse_event("scene_token", {"t": token})
+
+        scene = "".join(scene_parts)
+        raw = call_gemini(
+            f"{FOLD_PROMPT}\n\nStory-so-far summary:\n{req.summary}\n\nNewest scene:\n{scene}",
+            max_tokens=400,
+            temperature=0.7,
+            label="fold",
+        )
+        summary, scenarios = validate_turn_payload(raw)
+        yield sse_event("turn_complete", {"summary": summary, "scenarios": scenarios})
+    except HTTPException as e:
+        yield sse_event("error", {"status": e.status_code, "detail": e.detail})
+    except Exception as e:
+        yield sse_event("error", {"status": 500, "detail": f"Unexpected error: {e}"})
 
 
 @app.post("/continue/stream")
 def continue_story_stream(req: ContinueRequest, mock: bool = False):
     """Streaming twin of /continue: scene tokens as SSE, then the folded turn."""
     # Validation happens BEFORE streaming starts, so it's a normal HTTP error.
-    get_template_or_404(req.template_id)
+    template = get_template_or_404(req.template_id)
 
     if mock:
         if os.environ.get("DEV_MOCK_ENABLED") != "1":
@@ -473,9 +516,7 @@ def continue_story_stream(req: ContinueRequest, mock: bool = False):
             )
         return StreamingResponse(_stream_mock(), media_type="text/event-stream")
 
-    raise HTTPException(status_code=501, detail="Real streaming lands in the next task.")
-    # ^ deliberate one-task placeholder: Task 3 replaces this line with the
-    #   real streaming path. Kept explicit so the increment is honest.
+    return StreamingResponse(_stream_turn(req, template), media_type="text/event-stream")
 
 
 # A trivial health check, handy for confirming the server is up.
