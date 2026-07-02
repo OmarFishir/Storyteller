@@ -129,40 +129,44 @@ FastAPI server in `main.py`:
   characters/facts/unresolved threads) and proposes the next 3 options. Reuses
   `parse_model_json()` and `get_template_or_404()` from `/suggest`.
 - `call_gemini(contents, max_tokens, temperature, label="unlabeled")` — the ONE
-  shared helper every endpoint uses. Retries transient `errors.ServerError` (5xx)
-  up to 3 times with exponential backoff (1s, 2s, 4s); on exhaustion raises a
-  clean 503. Verified live: the free tier overloads often, and this returns a
-  graceful 503 instead of a crash. Also logs every successful call's token usage
-  (below) — the cost meter lives here because every endpoint funnels through this
-  one function. Live-verification note: it only retries 5xx `ServerError` — a 429
-  `RESOURCE_EXHAUSTED` (the free tier's *daily* request quota, separate from
-  transient overload) is not retried and surfaces as an unhandled error. That's a
-  known gap, not a regression: quota/rate-limiting was explicitly out of scope for
-  this phase (see NEXT STEPS).
+  shared helper every endpoint uses. Error handling (hardened after the Phase 1
+  final review): retries transient `errors.ServerError` (5xx) up to 3 times with
+  exponential backoff (1s, 2s, 4s), clean 503 on exhaustion (verified live); a
+  429 quota `ClientError` raises a clean 429 immediately (NO retry — backoff
+  can't fix a daily cap; other 4xx re-raise); an empty/None `response.text`
+  (safety block / no candidates) raises a clean 502 instead of leaking
+  `"scene": null` into a story as a false 200. Also logs every call's token
+  usage (below) — the cost meter lives here because every endpoint funnels
+  through this one function.
 - `usage_log.log_usage(label, model, input_tokens, output_tokens)` — appends one
   JSON line per Gemini call to `logs/usage.jsonl` (git-ignored). Labels in use:
-  `suggest`, `expand`, `scene`, `fold`. A logging failure is swallowed — it must
-  never break the request it's measuring. The whole "dashboard" for now is
-  opening the file.
+  `suggest`, `expand`, `scene`, `fold`. A logging failure is swallowed (it must
+  never break the request it's measuring) but warns on stderr so a dead meter is
+  visible. The whole "dashboard" for now is opening the file.
 
 Tests in `tests/test_api.py` and `tests/test_templates.py` (pytest + FastAPI
-`TestClient`, **23 tests**): health check; retry-then-succeed and
-retry-exhaustion → 503; /suggest shape bare and with `template_id` (plus 404 on
-an unknown one); /expand shape and validation (422 on missing field); /continue's
-scene+summary+scenarios shape and call order (`scene` then `fold`), its
-404/422/502 paths; `parse_model_json` fence-stripping and non-object rejection;
-usage-log appends and `call_gemini`'s logging (incl. "a logging failure doesn't
-break the request"); the template loader's validation (missing keys, duplicate
-ids, empty dir) plus the real `templates/` directory loading all four genres.
-Tests MOCK the Gemini layer — no real API calls, no cost. Run:
+`TestClient`, **29 tests**): health check; retry-then-succeed and
+retry-exhaustion → 503; 429-without-retry and other-4xx passthrough; empty-response
+→ 502; /suggest shape bare and with `template_id` (404 on unknown; prompt ORDER
+pinned: static prompt → genre style → premise, the caching contract); /expand
+shape and validation (422); /continue's scene+summary+scenarios shape, call order
+(`scene` then `fold`), per-call cost caps pinned ((600,0.9)/(400,0.7)), its
+404/422/502 paths incl. structurally-bad scribe JSON; `parse_model_json`
+fence-stripping and non-object rejection; usage-log appends, logging-failure
+resilience + stderr warning; the template loader's validation (missing keys,
+duplicate ids, empty dir) plus the real `templates/` dir loading all four genres.
+Tests MOCK the Gemini layer — enforced structurally: `tests/conftest.py` sets a
+dummy `GEMINI_API_KEY` (suite runs on a clean clone, no `.env` needed) and an
+autouse tripwire makes any un-mocked Gemini call fail loudly. Run:
 `venv\Scripts\python.exe -m pytest tests/ -v`.
 
 Live-verified against real Gemini (2026-07-02): `/templates` → `/suggest` with
 `template_id=fantasy` → `/continue` produced a real fantasy-style scene and a
 58-word summary that correctly retained the story's key location by name. A
-second `/continue` turn hit the account's free-tier *daily* request cap
-mid-verification (see `call_gemini` note above) — expected free-tier friction,
-not a functional defect.
+second `/continue` turn hit the account's free-tier *daily* request cap (20
+req/day; `/continue` burns 2/turn) — expected free-tier friction, not a defect;
+it now surfaces as a clean 429. Minor known wrinkle (deliberately riding to
+Phase 6): per-minute 429s get the same "daily quota" message as daily-cap 429s.
 
 Supporting files: `requirements.txt` (fastapi, uvicorn, python-dotenv, google-genai,
 pytest), `.env.example` (template), real `.env` (holds `GEMINI_API_KEY`, git-ignored),
