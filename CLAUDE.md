@@ -223,12 +223,82 @@ genres). Design docs live under `docs/superpowers/specs/` and `docs/superpowers/
 Public on GitHub: `github.com/OmarFishir/Storyteller`, branch `master` tracking
 `origin/master`.
 
+### Client app (`client/`)
+
+Expo Router + TypeScript, SDK 57 (React Native 0.86, React 19.2.3). Lives in
+`client/`, not `app/` — Expo Router's file-based routing owns an `app/` folder
+*inside* the project, so the project root needed a different name (approved
+deviation from the original spec's `app/`).
+
+- **Screens** (`client/app/`): `index.tsx` (Home) — loads `GET /templates`,
+  renders a genre card per template plus tappable premise-seed chips that fill
+  the premise box, "Begin the story" routes to `/story`. `story.tsx` (Story) —
+  runs the turn loop against `POST /continue/stream`: an effect kicks off the
+  opening turn on mount, `token` events accumulate into `StreamingText`,
+  `turn_complete` archives the finished scene and renders however many option
+  cards the server actually sent (not hardcoded to 3), a `streamingRef` flag
+  ignores a second tap while a turn is already streaming.
+- **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
+  across network chunk boundaries (splits on `"\n\n"`, and copes if the
+  separator itself is split across chunks) and turns `scene_token` /
+  `turn_complete` / `error` server events into one `StreamEvent` union.
+  Malformed JSON in a known event becomes `stream_error` 500; unknown event
+  names are silently ignored (forward-compat with future backend events).
+- **`lib/api.ts`** — `getTemplates()` and `streamTurn()`, the app's only two
+  calls into the backend. ONE error channel: a pre-stream plain-HTTP failure
+  (404/403/422), a network failure that never reaches the server (`status: 0`,
+  "Can't reach the storyteller. Is the backend running?"), and a connection
+  that drops mid-stream after tokens already arrived (`status: 0`,
+  "Connection lost mid-story. Tap to retry.") all surface through the SAME
+  `stream_error` event that real backend `error` frames use — the UI renders
+  exactly one failure path, never a raw thrown exception.
+- **`lib/fetch.ts`** — `streamingFetch`, a one-line seam wrapping `expo/fetch`
+  (streams response bodies on native; web's native `fetch` already streams).
+  Tests mock this single function instead of touching the network.
+- **`components/StreamingText.tsx`** — the signature word-materialize
+  animation (Reanimated `FadeInDown` per word). Contract: append-only — pass
+  the FULL accumulated text each render; already-rendered words keep stable
+  keys so they never re-animate or disappear, only new words fade/rise in.
+  Network-ignorant: same input whether fed by live SSE, mock mode, or a test
+  fixture.
+- **Env config**: `EXPO_PUBLIC_API_URL` (backend base URL — LAN IP, not
+  `localhost`, when running on a phone via Expo Go) and `EXPO_PUBLIC_USE_MOCK`
+  (`1` routes `streamTurn` to `/continue/stream?mock=true`, the backend's
+  zero-cost canned stream; needs the backend's own `DEV_MOCK_ENABLED=1`).
+  Template: `client/.env.example` (copy to `client/.env`, git-ignored).
+- **Version pins**: SDK 57 shipped ahead of some peers, so
+  `@testing-library/react-native` is pinned to exact `13.3.3` and
+  `react-test-renderer` to exact `19.2.3` (not ranges) to keep that
+  RNTL/React version triangle consistent; `client/.npmrc` sets
+  `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
+  React Native 0.86 upstream. Remove both pins once upstream catches up.
+- Tests (jest-expo preset, `restoreMocks: true`, **23 tests** across 6 suites):
+  `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
+  separator-split cases, malformed JSON, unknown events);
+  `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
+  status-0 connection-loss and pre-stream-404 cases); `lib/__tests__/smoke.test.ts`;
+  `components/__tests__/StreamingText.test.tsx` (append-only rendering,
+  paragraph breaks); `app/__tests__/index.test.tsx` (card-per-template, seed
+  tap, load-failure retry); `app/__tests__/story.test.tsx` (full turn loop,
+  option cards tracking arrival count, mid-stream error keeps partial text,
+  429 daily-quota message, retry re-runs the same turn, overlapping-tap
+  guard). Gemini is never reached from these tests — the backend has its own
+  separate suite. Run: `cd client && npx jest --watchAll=false`.
+- Verified 2026-07-03: `npx tsc --noEmit` clean; `npx expo export --platform web`
+  produces a static bundle (`client/dist/`, git-ignored) with no errors.
+
 ## Environment / how to run
 
 - Windows, PowerShell, VS Code. Project at `C:\dev\Storyteller`.
 - Activate venv: `venv\Scripts\activate` (NOT the Unix `source` path).
 - Run server: `uvicorn main:app --reload`. Test UI: `http://127.0.0.1:8000/docs`.
-- Run tests: `venv\Scripts\python.exe -m pytest tests/ -v`.
+- Run backend tests: `venv\Scripts\python.exe -m pytest tests/ -v`.
+- Run client (web preview): `cd client && npx expo start --web`. Mock story
+  turns need the backend running with `DEV_MOCK_ENABLED=1` in ITS `.env`
+  (client's own `.env`, from `client/.env.example`, sets
+  `EXPO_PUBLIC_USE_MOCK=1` to opt in).
+- Run client tests: `cd client && npx jest --watchAll=false`. Type-check:
+  `cd client && npx tsc --noEmit`.
 
 ## NEXT STEPS — follow the roadmap
 
@@ -239,9 +309,12 @@ The approved phase plan lives in
    (client carries summary; stateless), genre template system v1 (4 genres as
    data files, `GET /templates`), token/cost logging, public GitHub remote. All
    live-verified against real Gemini; see "What's BUILT and WORKING" above.
-2. **Phase 2 (NEXT): vertical slice** — Expo app skeleton, streaming (SSE) story view
-   with animated text, push-to-talk on-device speech recognition, narration v1
-   (quality TTS ~$5 + device-TTS fallback), abortable playback.
+2. **Phase 2 (IN PROGRESS): vertical slice** — Expo app skeleton, streaming (SSE)
+   story view with animated text, push-to-talk on-device speech recognition,
+   narration v1 (quality TTS ~$5 + device-TTS fallback), abortable playback.
+   Slice A (backend SSE streaming + mock mode) DONE. Slice B (Expo app: screens,
+   `lib/` bridge, StreamingText animation) DONE — see "Client app (`client/`)"
+   above. Slice C (push-to-talk) NEXT; slice D (narration v1) after that.
 3. **Phase 3: product core** — story persistence (SQLite, story IDs), voice-driven
    editing with morph animation, prompt caching, latency/failure UX.
 4. **Phase 4: expressive narration** — streamed audio, per-genre voices, loose sync.
