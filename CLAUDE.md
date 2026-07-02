@@ -237,13 +237,20 @@ deviation from the original spec's `app/`).
   opening turn on mount, `token` events accumulate into `StreamingText`,
   `turn_complete` archives the finished scene and renders however many option
   cards the server actually sent (not hardcoded to 3), a `streamingRef` flag
-  ignores a second tap while a turn is already streaming.
+  ignores a second tap while a turn is already streaming. A `stream_error`
+  event drives a retry banner via `errorMessage()`: 429 → the daily-quota
+  message, 503 → "the muse is busy", status 0 → renders the client-authored
+  `detail` string verbatim (the connection-lost / can't-reach-backend copy
+  from `lib/api.ts`), anything else → a generic "Something went wrong — tap
+  to retry." fallback.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
   `turn_complete` / `error` server events into one `StreamEvent` union.
-  Malformed JSON in a known event becomes `stream_error` 500; unknown event
-  names are silently ignored (forward-compat with future backend events).
+  Malformed JSON in a known event becomes `stream_error` 500; an unknown
+  event name is silently ignored ONLY when its frame's JSON parses cleanly
+  (forward-compat with future backend events) — malformed JSON in ANY frame,
+  known event or unknown, still yields a `stream_error`.
 - **`lib/api.ts`** — `getTemplates()` and `streamTurn()`, the app's only two
   calls into the backend. ONE error channel: a pre-stream plain-HTTP failure
   (404/403/422), a network failure that never reaches the server (`status: 0`,
@@ -272,7 +279,7 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **23 tests** across 6 suites):
+- Tests (jest-expo preset, `restoreMocks: true`, **24 tests** across 6 suites):
   `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
   separator-split cases, malformed JSON, unknown events);
   `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
@@ -281,9 +288,10 @@ deviation from the original spec's `app/`).
   paragraph breaks); `app/__tests__/index.test.tsx` (card-per-template, seed
   tap, load-failure retry); `app/__tests__/story.test.tsx` (full turn loop,
   option cards tracking arrival count, mid-stream error keeps partial text,
-  429 daily-quota message, retry re-runs the same turn, overlapping-tap
-  guard). Gemini is never reached from these tests — the backend has its own
-  separate suite. Run: `cd client && npx jest --watchAll=false`.
+  the status-0 connection-lost detail rendering verbatim, 429 daily-quota
+  message, retry re-runs the same turn, overlapping-tap guard). Gemini is
+  never reached from these tests — the backend has its own separate suite.
+  Run: `cd client && npx jest --watchAll=false`.
 - Verified 2026-07-03: `npx tsc --noEmit` clean; `npx expo export --platform web`
   produces a static bundle (`client/dist/`, git-ignored) with no errors.
 
