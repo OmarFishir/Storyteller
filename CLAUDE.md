@@ -98,6 +98,9 @@ Verify current prices at each phase's design — never from memory.
 
 FastAPI server in `main.py`:
 
+- **CORS** — wide-open (`allow_origins=["*"]`) so the browser-based Expo dev loop
+  (a different origin) can call this API. Dev-only stance; must be locked down
+  before any public exposure (roadmap Phase 6).
 - `GET /` — health check, returns `{"status":"ok",...}`.
 - `GET /templates` — lists the 4 genre templates (`fantasy`, `noir`, `scifi`,
   `fairytale`) as `{id, name, description, premise_seeds}`. The `style` field
@@ -128,6 +131,18 @@ FastAPI server in `main.py`:
   into an updated summary (contract: stay under ~150 words, preserve named
   characters/facts/unresolved threads) and proposes the next 3 options. Reuses
   `parse_model_json()` and `get_template_or_404()` from `/suggest`.
+- `POST /continue/stream` — SSE twin of `/continue`, same request body, plus an
+  optional `?mock=true`. Streams `scene_token` frames (`{"t": "..."}`) as the
+  scene is generated, then one `scene_token*` → `turn_complete`
+  (`{"summary": "...", "scenarios": [...]}`) or, on any failure, a terminal
+  `error` frame (`{"status": ..., "detail": "..."}`) instead — the client keeps
+  every token already shown, since you can't un-send half a scene. Retry/backoff
+  and the clean 429 only apply BEFORE the first byte of the scene; once
+  streaming has started, any failure (mid-stream 5xx, 429 from the follow-up
+  fold call, etc.) becomes a terminal error frame instead of a retry. Mock mode
+  (`?mock=true`, gated by `DEV_MOCK_ENABLED=1` in `.env`, 403 if unset) streams a
+  canned scene word-by-word with realistic pacing and a canned `turn_complete`
+  — zero Gemini calls, doubles as the client-animation dev fixture.
 - `call_gemini(contents, max_tokens, temperature, label="unlabeled")` — the ONE
   shared helper every endpoint uses. Error handling (hardened after the Phase 1
   final review): retries transient `errors.ServerError` (5xx) up to 3 times with
@@ -138,6 +153,15 @@ FastAPI server in `main.py`:
   `"scene": null` into a story as a false 200. Also logs every call's token
   usage (below) — the cost meter lives here because every endpoint funnels
   through this one function.
+- `call_gemini_stream(contents, max_tokens, temperature, label="unlabeled")` —
+  streaming sibling of `call_gemini`: a generator yielding the model's text
+  chunk by chunk via `generate_content_stream`, for `/continue/stream`'s scene
+  call. Retry/backoff (5xx) and the clean 429 apply only BEFORE the first
+  chunk — a generator, so those raise on first `next()`, not at call time; once
+  a chunk has been yielded, later failures are the caller's problem (can't
+  un-send half a scene). Usage is logged once the stream ends, in a `finally`
+  block, so a mid-stream failure or client disconnect still records whatever
+  usage was seen by then (best-effort, never zero silently swallowed).
 - `usage_log.log_usage(label, model, input_tokens, output_tokens)` — appends one
   JSON line per Gemini call to `logs/usage.jsonl` (git-ignored). Labels in use:
   `suggest`, `expand`, `scene`, `fold`. A logging failure is swallowed (it must
@@ -145,7 +169,7 @@ FastAPI server in `main.py`:
   visible. The whole "dashboard" for now is opening the file.
 
 Tests in `tests/test_api.py` and `tests/test_templates.py` (pytest + FastAPI
-`TestClient`, **29 tests**): health check; retry-then-succeed and
+`TestClient`, **42 tests**): health check; retry-then-succeed and
 retry-exhaustion → 503; 429-without-retry and other-4xx passthrough; empty-response
 → 502; /suggest shape bare and with `template_id` (404 on unknown; prompt ORDER
 pinned: static prompt → genre style → premise, the caching contract); /expand
@@ -154,11 +178,19 @@ shape and validation (422); /continue's scene+summary+scenarios shape, call orde
 404/422/502 paths incl. structurally-bad scribe JSON; `parse_model_json`
 fence-stripping and non-object rejection; usage-log appends, logging-failure
 resilience + stderr warning; the template loader's validation (missing keys,
-duplicate ids, empty dir) plus the real `templates/` dir loading all four genres.
-Tests MOCK the Gemini layer — enforced structurally: `tests/conftest.py` sets a
-dummy `GEMINI_API_KEY` (suite runs on a clean clone, no `.env` needed) and an
-autouse tripwire makes any un-mocked Gemini call fail loudly. Run:
-`venv\Scripts\python.exe -m pytest tests/ -v`.
+duplicate ids, empty dir) plus the real `templates/` dir loading all four genres;
+`call_gemini_stream`'s chunk yielding + usage logging, retry-before-first-chunk,
+429-no-retry, empty-stream 502, and usage logged on early close (client
+disconnect mid-stream); `/continue/stream` mock mode (env-gate 403 when unset,
+canned scene streams correctly, 404 on unknown template before streaming
+starts); CORS headers present; the real streaming path emitting `scene_token*`
+→ `turn_complete`, scribe-garbage becoming an `error` frame, and a mid-stream
+failure keeping already-sent tokens; a regression test pinning `/continue`'s
+behavior unchanged after its validation was refactored into the shared
+`validate_turn_payload()` helper. Tests MOCK the Gemini layer — enforced
+structurally: `tests/conftest.py` sets a dummy `GEMINI_API_KEY` (suite runs on
+a clean clone, no `.env` needed) and an autouse tripwire makes any un-mocked
+Gemini call fail loudly. Run: `venv\Scripts\python.exe -m pytest tests/ -v`.
 
 Live-verified against real Gemini (2026-07-02): `/templates` → `/suggest` with
 `template_id=fantasy` → `/continue` produced a real fantasy-style scene and a
@@ -167,6 +199,18 @@ second `/continue` turn hit the account's free-tier *daily* request cap (20
 req/day; `/continue` burns 2/turn) — expected free-tier friction, not a defect;
 it now surfaces as a clean 429. Minor known wrinkle (deliberately riding to
 Phase 6): per-minute 429s get the same "daily quota" message as daily-cap 429s.
+
+Live-verified `/continue/stream` (2026-07-03): mock mode (`?mock=true`) — 62
+`scene_token` frames reassembling exactly to `MOCK_SCENE`, one `turn_complete`
+matching `MOCK_TURN`, zero Gemini calls. Real path — two attempts, each showing
+genuine incremental token streaming from Gemini; attempt 1's scene was cut off
+mid-stream by a transient 503 (model overload), correctly surfacing as a
+terminal `error` frame; attempt 2's scene streamed to completion but the
+follow-up fold call then hit the free-tier request cap, again correctly
+surfacing as a terminal `error` frame (`status: 429`). Both confirm the
+mid-stream failure → error-frame contract works against the real API; the
+full happy path (`scene_token*` → `turn_complete` against live Gemini) should
+be re-attempted on a fresh-quota day before slice B's end-to-end test.
 
 Supporting files: `requirements.txt` (fastapi, uvicorn, python-dotenv, google-genai,
 pytest), `.env.example` (template), real `.env` (holds `GEMINI_API_KEY`, git-ignored),
