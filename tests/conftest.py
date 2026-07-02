@@ -28,4 +28,10 @@ def _block_real_gemini_calls(monkeypatch):
             "Test attempted a real Gemini API call - mock call_gemini or generate_content"
         )
 
+    def _refuse_stream(**kwargs):
+        raise AssertionError(
+            "Test attempted a real Gemini streaming call - mock call_gemini_stream or generate_content_stream"
+        )
+
     monkeypatch.setattr(main.client.models, "generate_content", _refuse)
+    monkeypatch.setattr(main.client.models, "generate_content_stream", _refuse_stream)

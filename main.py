@@ -248,6 +248,88 @@ def call_gemini(
     )
 
 
+def call_gemini_stream(
+    contents: str, max_tokens: int, temperature: float, label: str = "unlabeled"
+):
+    """
+    Streaming sibling of call_gemini: yields the model's text chunk by chunk
+    as it is generated (feeds the client's word-by-word animation).
+
+    Error policy changes at the first byte: retry/backoff (5xx) and the clean
+    429 apply only BEFORE the first chunk is yielded. Once text has gone out,
+    failures must be handled by the caller (the SSE endpoint turns them into
+    a terminal error frame) — you can't un-send half a scene.
+
+    Usage is logged when the stream finishes; the finally block makes that
+    best-effort even if the client disconnects mid-stream (whatever usage
+    was seen by then, else zeros).
+
+    NOTE: this is a generator — nothing runs until the first iteration, so
+    the 429/503 HTTPExceptions surface on first next(), not at call time.
+    """
+    delays = [1, 2, 4]
+    stream = None
+    first_chunk = None
+    for attempt in range(len(delays) + 1):
+        try:
+            stream = client.models.generate_content_stream(
+                model=MODEL,
+                contents=contents,
+                config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+            # The SDK stream is lazy: the request actually fires here.
+            first_chunk = next(stream, None)
+            break
+        except errors.ClientError as e:
+            if getattr(e, "code", None) == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily AI quota reached. Please try again later.",
+                )
+            raise
+        except errors.ServerError:
+            if attempt < len(delays):
+                time.sleep(delays[attempt])
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The AI model is busy right now. Please try again in a moment.",
+                )
+
+    yielded_any = False
+    last_usage = None
+    try:
+        chunk = first_chunk
+        while chunk is not None:
+            usage = getattr(chunk, "usage_metadata", None)
+            if usage is not None:
+                last_usage = usage
+            if chunk.text:
+                yielded_any = True
+                yield chunk.text
+            chunk = next(stream, None)
+    finally:
+        try:
+            usage_log.log_usage(
+                label=label,
+                model=MODEL,
+                input_tokens=(last_usage.prompt_token_count or 0) if last_usage else 0,
+                output_tokens=(last_usage.candidates_token_count or 0) if last_usage else 0,
+            )
+        except Exception as e:
+            # The cost meter must never break the stream it measures.
+            print(f"WARNING: usage logging failed: {e}", file=sys.stderr)
+
+    if not yielded_any:
+        raise HTTPException(
+            status_code=502,
+            detail="Model returned an empty response. Try rephrasing or try again.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # 4. The endpoint
 # ---------------------------------------------------------------------------

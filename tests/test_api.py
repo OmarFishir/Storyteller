@@ -337,3 +337,94 @@ def test_continue_502_when_scribe_scenarios_not_a_list(monkeypatch):
         },
     )
     assert resp.status_code == 502
+
+
+# ============================================================================
+# call_gemini_stream tests
+# ============================================================================
+
+class FakeChunk:
+    def __init__(self, text=None, usage=None):
+        self.text = text
+        self.usage_metadata = usage
+
+
+class FakeStreamUsage:
+    prompt_token_count = 50
+    candidates_token_count = 70
+
+
+def test_call_gemini_stream_yields_chunks_and_logs_usage(monkeypatch):
+    logged = []
+    monkeypatch.setattr(main.usage_log, "log_usage", lambda **kw: logged.append(kw))
+    chunks = [
+        FakeChunk(text="Once "),
+        FakeChunk(text="upon a time."),
+        FakeChunk(text=None, usage=FakeStreamUsage()),  # final chunk: no text, has usage
+    ]
+    monkeypatch.setattr(
+        main.client.models, "generate_content_stream", lambda **k: iter(chunks)
+    )
+
+    out = list(main.call_gemini_stream("p", max_tokens=600, temperature=0.9, label="scene"))
+    assert out == ["Once ", "upon a time."]
+    assert logged == [
+        {"label": "scene", "model": main.MODEL, "input_tokens": 50, "output_tokens": 70}
+    ]
+
+
+def test_call_gemini_stream_retries_server_error_before_first_chunk(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise errors.ServerError(503, {"error": {"message": "overloaded"}})
+        return iter([FakeChunk(text="ok")])
+
+    monkeypatch.setattr(main.client.models, "generate_content_stream", flaky)
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+
+    assert list(main.call_gemini_stream("p", max_tokens=10, temperature=0.5)) == ["ok"]
+    assert calls["n"] == 3
+
+
+def test_call_gemini_stream_429_no_retry(monkeypatch):
+    calls = {"n": 0}
+
+    def quota(**kwargs):
+        calls["n"] += 1
+        raise errors.ClientError(429, {"error": {"message": "quota exceeded"}})
+
+    monkeypatch.setattr(main.client.models, "generate_content_stream", quota)
+
+    with pytest.raises(HTTPException) as exc_info:
+        list(main.call_gemini_stream("p", max_tokens=10, temperature=0.5))
+    assert exc_info.value.status_code == 429
+    assert calls["n"] == 1
+
+
+def test_call_gemini_stream_empty_stream_502(monkeypatch):
+    monkeypatch.setattr(
+        main.client.models,
+        "generate_content_stream",
+        lambda **k: iter([FakeChunk(text=None)]),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        list(main.call_gemini_stream("p", max_tokens=10, temperature=0.5))
+    assert exc_info.value.status_code == 502
+
+
+def test_call_gemini_stream_logs_on_early_close(monkeypatch):
+    logged = []
+    monkeypatch.setattr(main.usage_log, "log_usage", lambda **kw: logged.append(kw))
+    chunks = [FakeChunk(text="Once "), FakeChunk(text="upon"), FakeChunk(text=" a time")]
+    monkeypatch.setattr(
+        main.client.models, "generate_content_stream", lambda **k: iter(chunks)
+    )
+
+    gen = main.call_gemini_stream("p", max_tokens=10, temperature=0.5, label="scene")
+    assert next(gen) == "Once "
+    gen.close()  # simulates client disconnect mid-stream
+    assert len(logged) == 1  # best-effort log still happened (zero counts: no usage seen)
+    assert logged[0]["label"] == "scene"
