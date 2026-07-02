@@ -223,7 +223,16 @@ def test_suggest_with_template_injects_style(monkeypatch):
     monkeypatch.setattr(main, "call_gemini", fake_call_gemini)
     resp = client.post("/suggest", json={"premise": "a heist", "template_id": "noir"})
     assert resp.status_code == 200
-    assert main.TEMPLATES["noir"]["style"] in captured["contents"]
+    contents = captured["contents"]
+    style = main.TEMPLATES["noir"]["style"]
+    assert style in contents
+    # Ordering matters for future prompt caching: static SYSTEM_PROMPT first,
+    # semi-static genre style second, dynamic premise last.
+    assert (
+        contents.index(main.SYSTEM_PROMPT[:40])
+        < contents.index(style)
+        < contents.index("Premise:")
+    )
 
 
 def test_suggest_rejects_unknown_template(monkeypatch):
@@ -240,9 +249,11 @@ def test_continue_returns_scene_summary_and_options(monkeypatch):
         ]
     )
     labels = []
+    call_params = []
 
     def fake_call_gemini(contents, **kwargs):
         labels.append(kwargs["label"])
+        call_params.append((kwargs["max_tokens"], kwargs["temperature"]))
         return next(responses)
 
     monkeypatch.setattr(main, "call_gemini", fake_call_gemini)
@@ -260,6 +271,9 @@ def test_continue_returns_scene_summary_and_options(monkeypatch):
     assert data["summary"] == "updated summary"
     assert data["scenarios"] == ["a", "b", "c"]
     assert labels == ["scene", "fold"]  # creative call first, scribe second
+    # Pin the token/temperature budget per call: storyteller call is more
+    # expensive and more creative; scribe call is cheaper and more mechanical.
+    assert call_params == [(600, 0.9), (400, 0.7)]
 
 
 def test_continue_rejects_unknown_template():
@@ -277,6 +291,40 @@ def test_continue_rejects_missing_fields():
 
 def test_continue_502_when_scribe_returns_garbage(monkeypatch):
     responses = iter(["The scene prose.", "not json at all"])
+    monkeypatch.setattr(
+        main, "call_gemini", lambda contents, **kw: next(responses)
+    )
+    resp = client.post(
+        "/continue",
+        json={
+            "template_id": "fantasy",
+            "summary": "s",
+            "chosen_scenario": "c",
+        },
+    )
+    assert resp.status_code == 502
+
+
+def test_continue_502_when_scribe_json_missing_summary(monkeypatch):
+    responses = iter(["The scene prose.", '{"scenarios": ["a", "b", "c"]}'])
+    monkeypatch.setattr(
+        main, "call_gemini", lambda contents, **kw: next(responses)
+    )
+    resp = client.post(
+        "/continue",
+        json={
+            "template_id": "fantasy",
+            "summary": "s",
+            "chosen_scenario": "c",
+        },
+    )
+    assert resp.status_code == 502
+
+
+def test_continue_502_when_scribe_scenarios_not_a_list(monkeypatch):
+    responses = iter(
+        ["The scene prose.", '{"summary": "ok", "scenarios": "not a list"}']
+    )
     monkeypatch.setattr(
         main, "call_gemini", lambda contents, **kw: next(responses)
     )
