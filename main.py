@@ -74,6 +74,12 @@ class ExpandRequest(BaseModel):
     instruction: str
 
 
+class ContinueRequest(BaseModel):
+    template_id: str
+    summary: str
+    chosen_scenario: str
+
+
 # ---------------------------------------------------------------------------
 # 3. The prompt
 # ---------------------------------------------------------------------------
@@ -100,6 +106,32 @@ You will be given a single story scenario and an instruction for changing it.
 Rewrite the scenario to follow the instruction. Keep it vivid and self-contained.
 Respond with ONLY the rewritten scenario as plain prose — no preamble, no labels,
 no markdown, no quotes."""
+
+
+# Call 1 of /continue — the "storyteller". Writes the actual scene as pure
+# prose (NO JSON): mixing creative prose into JSON is where models break
+# formatting, so prose stays prose.
+STORY_PROMPT = """You are the narrator of an interactive story.
+Write the next scene as vivid prose, 2-3 short paragraphs.
+Follow the genre style exactly. Continue naturally from the story so far, and
+make the scene deliver on the chosen direction. End at a natural pause that
+invites the next choice. Respond with ONLY the scene prose — no title, no
+labels, no markdown."""
+
+# Call 2 of /continue — the "scribe". Mechanical job: fold the new scene into
+# a compact summary and offer the next 3 options. This is the cost-control
+# contract: a 50-turn story still sends ~150 words of history, not the
+# whole transcript.
+FOLD_PROMPT = """You are the scribe for an interactive story. You receive the
+story-so-far summary and the newest scene. Do two jobs:
+1. Fold the newest scene into an updated summary of the WHOLE story so far.
+   Keep it under 150 words. Preserve named characters, key facts, and
+   unresolved plot threads.
+2. Propose exactly 3 distinct options for what could happen next. Each option
+   must be 1-2 sentences and meaningfully different from the others.
+
+Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
+{"summary": "updated summary", "scenarios": ["option one", "option two", "option three"]}"""
 
 
 def parse_model_json(raw_text: str) -> dict:
@@ -234,6 +266,46 @@ def expand(req: ExpandRequest):
         label="expand",
     )
     return {"original": req.scenario, "expanded": expanded}
+
+
+@app.post("/continue")
+def continue_story(req: ContinueRequest):
+    """Advance the story one turn: write the scene, update the summary, offer next options."""
+    template = get_template_or_404(req.template_id)
+
+    # Call 1 — storyteller (creative): write the scene as pure prose.
+    scene = call_gemini(
+        f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}\n\n"
+        f"Story so far:\n{req.summary}\n\n"
+        f"Chosen direction:\n{req.chosen_scenario}",
+        max_tokens=600,
+        temperature=0.9,
+        label="scene",
+    )
+
+    # Call 2 — scribe (mechanical): fold scene into summary + next options.
+    raw = call_gemini(
+        f"{FOLD_PROMPT}\n\nStory-so-far summary:\n{req.summary}\n\nNewest scene:\n{scene}",
+        max_tokens=400,
+        temperature=0.7,
+        label="fold",
+    )
+    data = parse_model_json(raw)
+    summary = data.get("summary")
+    scenarios = data.get("scenarios")
+    if not isinstance(summary, str) or not summary.strip():
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'summary'. Raw: {raw[:300]}",
+        )
+    if not isinstance(scenarios, list) or not all(
+        isinstance(s, str) for s in scenarios
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'scenarios'. Raw: {raw[:300]}",
+        )
+    return {"scene": scene, "summary": summary, "scenarios": scenarios}
 
 
 # A trivial health check, handy for confirming the server is up.

@@ -171,3 +171,62 @@ def test_suggest_rejects_unknown_template(monkeypatch):
     monkeypatch.setattr(main, "call_gemini", lambda *a, **k: "unused")
     resp = client.post("/suggest", json={"premise": "x", "template_id": "nope"})
     assert resp.status_code == 404
+
+
+def test_continue_returns_scene_summary_and_options(monkeypatch):
+    responses = iter(
+        [
+            "The scene prose.",
+            '{"summary": "updated summary", "scenarios": ["a", "b", "c"]}',
+        ]
+    )
+    labels = []
+
+    def fake_call_gemini(contents, **kwargs):
+        labels.append(kwargs["label"])
+        return next(responses)
+
+    monkeypatch.setattr(main, "call_gemini", fake_call_gemini)
+    resp = client.post(
+        "/continue",
+        json={
+            "template_id": "fantasy",
+            "summary": "A knight seeks a dragon.",
+            "chosen_scenario": "She enters the cave.",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["scene"] == "The scene prose."
+    assert data["summary"] == "updated summary"
+    assert data["scenarios"] == ["a", "b", "c"]
+    assert labels == ["scene", "fold"]  # creative call first, scribe second
+
+
+def test_continue_rejects_unknown_template():
+    resp = client.post(
+        "/continue",
+        json={"template_id": "nope", "summary": "s", "chosen_scenario": "c"},
+    )
+    assert resp.status_code == 404
+
+
+def test_continue_rejects_missing_fields():
+    resp = client.post("/continue", json={"template_id": "fantasy"})
+    assert resp.status_code == 422
+
+
+def test_continue_502_when_scribe_returns_garbage(monkeypatch):
+    responses = iter(["The scene prose.", "not json at all"])
+    monkeypatch.setattr(
+        main, "call_gemini", lambda contents, **kw: next(responses)
+    )
+    resp = client.post(
+        "/continue",
+        json={
+            "template_id": "fantasy",
+            "summary": "s",
+            "chosen_scenario": "c",
+        },
+    )
+    assert resp.status_code == 502
