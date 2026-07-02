@@ -1,9 +1,11 @@
+import json as jsonlib
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from google.genai import errors
 
 import main
+import usage_log
 
 client = TestClient(main.app)
 
@@ -74,3 +76,41 @@ def test_expand_returns_original_and_expanded(monkeypatch):
 def test_expand_rejects_missing_instruction():
     resp = client.post("/expand", json={"scenario": "only the scenario"})
     assert resp.status_code == 422  # Pydantic validation rejects missing field
+
+
+def test_log_usage_appends_jsonl_lines():
+    usage_log.log_usage("test", "some-model", 123, 45)
+    usage_log.log_usage("test2", "some-model", 10, 5)
+
+    with open(usage_log.LOG_PATH, encoding="utf-8") as f:
+        lines = f.read().strip().splitlines()
+    assert len(lines) == 2
+    entry = jsonlib.loads(lines[0])
+    assert entry["label"] == "test"
+    assert entry["input_tokens"] == 123
+    assert entry["output_tokens"] == 45
+    assert "ts" in entry
+
+
+def test_call_gemini_logs_usage(monkeypatch):
+    logged = []
+    monkeypatch.setattr(
+        main.usage_log, "log_usage", lambda **kw: logged.append(kw)
+    )
+
+    class FakeUsage:
+        prompt_token_count = 11
+        candidates_token_count = 22
+
+    class FakeResponse:
+        text = "hi"
+        usage_metadata = FakeUsage()
+
+    monkeypatch.setattr(
+        main.client.models, "generate_content", lambda **k: FakeResponse()
+    )
+
+    main.call_gemini("p", max_tokens=10, temperature=0.1, label="scene")
+    assert logged == [
+        {"label": "scene", "model": main.MODEL, "input_tokens": 11, "output_tokens": 22}
+    ]

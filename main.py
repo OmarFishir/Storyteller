@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
 
+import usage_log
+
 # ---------------------------------------------------------------------------
 # 1. Load secrets
 # ---------------------------------------------------------------------------
@@ -128,14 +130,18 @@ def parse_scenarios(raw_text: str) -> list[str]:
         )
 
 
-def call_gemini(contents: str, max_tokens: int, temperature: float) -> str:
+def call_gemini(
+    contents: str, max_tokens: int, temperature: float, label: str = "unlabeled"
+) -> str:
     """
     Make ONE Gemini request, retrying transient server errors (5xx) with
     exponential backoff (1s, 2s, 4s). Returns the model's text.
 
+    Logs token usage for every successful call (the cost meter lives here
+    because every endpoint funnels through this one function).
+
     If the model is still unavailable after all retries, raises a clean
-    503 (HTTPException) instead of leaking a 500/stack trace. Both /suggest
-    and /expand call this, so retry logic lives in exactly one place.
+    503 (HTTPException) instead of leaking a 500/stack trace.
     """
     delays = [1, 2, 4]  # waits between attempts; 3 retries after the first try
     for attempt in range(len(delays) + 1):  # 4 attempts total
@@ -147,6 +153,13 @@ def call_gemini(contents: str, max_tokens: int, temperature: float) -> str:
                     "max_output_tokens": max_tokens,
                     "temperature": temperature,
                 },
+            )
+            usage = getattr(response, "usage_metadata", None)
+            usage_log.log_usage(
+                label=label,
+                model=MODEL,
+                input_tokens=(usage.prompt_token_count or 0) if usage else 0,
+                output_tokens=(usage.candidates_token_count or 0) if usage else 0,
             )
             return response.text
         except errors.ServerError:
@@ -170,6 +183,7 @@ def suggest(req: SuggestRequest):
         f"{SYSTEM_PROMPT}\n\nPremise: {req.premise}",
         max_tokens=300,
         temperature=0.9,
+        label="suggest",
     )
     scenarios = parse_scenarios(text)
     return {"scenarios": scenarios}
@@ -182,6 +196,7 @@ def expand(req: ExpandRequest):
         f"{EXPAND_PROMPT}\n\nScenario: {req.scenario}\n\nInstruction: {req.instruction}",
         max_tokens=600,
         temperature=0.8,
+        label="expand",
     )
     return {"original": req.scenario, "expanded": expanded}
 
