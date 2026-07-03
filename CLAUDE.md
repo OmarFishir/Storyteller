@@ -454,7 +454,7 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **60 tests** across 8 suites):
+- Tests (jest-expo preset, `restoreMocks: true`, **62 tests** across 8 suites):
   `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
   separator-split cases, malformed JSON, unknown events);
   `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
@@ -471,7 +471,9 @@ deviation from the original spec's `app/`).
   (new — guarded ordinals incl. "the last one" and out-of-bounds, bare
   ordinal words inside long sentences NOT matching, pick-verbs unlocking
   ordinals in longer utterances, word-overlap picking a clear winner,
-  ambiguous/gibberish/empty utterances all returning `null`);
+  ambiguous/gibberish/empty utterances all returning `null`, and "last"
+  with an empty cards list returning `null` — not `-1` — so a spoken "the
+  last one" at a retry banner falls through to free-form steering);
   `components/__tests__/StreamingText.test.tsx` (append-only rendering,
   paragraph breaks); `app/__tests__/index.test.tsx` (card-per-template, seed
   tap, load-failure retry, passing the chosen length to the story route, and
@@ -485,15 +487,25 @@ deviation from the original spec's `app/`).
   a spoken ordinal picking a card and auto-firing after the confirm window,
   unmatched speech steering the story free-form, Cancel inside the confirm
   window discarding the utterance, PTT disabled while a turn is streaming, a
-  mic-permission error rendering inline, and the "← Home" back control
-  existing); a `resolveStoryLength` unit-test block (4 tests) pinning the
+  mic-permission error rendering inline, the "← Home" back control
+  existing, and a card tap during the confirm window discarding the pending
+  spoken utterance — no stale-timer double turn); a `resolveStoryLength`
+  unit-test block (4 tests) pinning the
   total fallback to `"short"` for an invalid string, an array (duplicated
   query param), and a missing value. Gemini is never reached from these
   tests — the backend has its own separate suite.
   Run: `cd client && npx jest --watchAll=false`.
-- Verified 2026-07-04: `npx jest --watchAll=false` → 60/60 passing across 8
+- Verified 2026-07-04: `npx jest --watchAll=false` → 62/62 passing across 8
   suites; `npx tsc --noEmit` clean; `npx expo export --platform web` produces
   a static bundle (`client/dist/`, git-ignored) with no errors.
+- Final-review hardening (same day, commit `57da2f7`): `matchCard`'s "last"
+  path bounds-guarded against an empty cards list; `PushToTalk` aborts any
+  live recognition on unmount (no hot mic / ghost turn after navigating
+  away); `streamTurn`'s `reader.cancel()` rejection is swallowed on the
+  promise itself (it rejects on an errored/aborted stream — a sync
+  try/catch can't catch it); `runTurn` cancels any pending confirm timer
+  right after its overlap guard, so tapping a card or retry during the
+  confirm window discards the spoken utterance instead of double-firing.
 
 ## Environment / how to run
 
