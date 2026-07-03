@@ -326,25 +326,48 @@ deviation from the original spec's `app/`).
   the premise box, a story-length picker (chip row: `Short` / `Medium` /
   `Long`, default `Short`, styled like the genre-card selection highlight),
   "Begin the story" routes to `/story` carrying the chosen `length` as a route
-  param alongside the template/premise. `story.tsx` (Story) — runs the turn
-  loop against `POST /continue/stream`: an effect kicks off the opening turn
-  on mount, `token` events accumulate into `StreamingText`, `turn_complete`
-  archives the finished scene and renders however many option cards the
-  server actually sent (not hardcoded to 3), a `streamingRef` flag ignores a
-  second tap while a turn is already streaming. Every request (mount-effect
-  and each chosen option) carries `turn: scenes.length + 1` and the `length`
-  read from the route param via `resolveStoryLength()` — the route param is
-  an unchecked value (URL-editable on web, and can arrive as an array if the
-  query string duplicates the key), so anything other than exactly `"short"`
-  / `"medium"` / `"long"` falls back to `"short"` rather than being cast
-  straight through to the backend — the same carry-it-yourself pattern as
-  the backend's `summary`; retry re-sends the frozen, already-built request
-  object unchanged, so retrying never advances the turn counter or changes
-  the beat the story is on. A `stream_error` event drives a retry banner via
-  `errorMessage()`: 429 → the daily-quota message, 503 → "the muse is busy",
-  status 0 → renders the client-authored `detail` string verbatim (the
-  connection-lost / can't-reach-backend copy from `lib/api.ts`), anything else
-  → a generic "Something went wrong — tap to retry." fallback.
+  param alongside the template/premise. A compact `PushToTalk` mic sits beside
+  the premise box (rendered only once a template is selected and voice input
+  is available); the final transcript replaces the premise value directly —
+  the input itself is the confirm step, no separate confirmation UI on Home.
+  `story.tsx` (Story) — runs the turn loop against `POST /continue/stream`: an
+  effect kicks off the opening turn on mount, `token` events accumulate into
+  `StreamingText`, `turn_complete` archives the finished scene and renders
+  however many option cards the server actually sent (not hardcoded to 3), a
+  `streamingRef` flag ignores a second tap while a turn is already streaming;
+  a reactive `isStreaming` state mirrors that same ref (both flip together in
+  `runTurn`'s try/finally) so streaming state can drive UI, not just gate
+  logic. Every request (mount-effect and each chosen option) carries
+  `turn: scenes.length + 1` and the `length` read from the route param via
+  `resolveStoryLength()` — the route param is an unchecked value (URL-editable
+  on web, and can arrive as an array if the query string duplicates the key),
+  so anything other than exactly `"short"` / `"medium"` / `"long"` falls back
+  to `"short"` rather than being cast straight through to the backend — the
+  same carry-it-yourself pattern as the backend's `summary`; retry re-sends
+  the frozen, already-built request object unchanged, so retrying never
+  advances the turn counter or changes the beat the story is on. A
+  `stream_error` event drives a retry banner via `errorMessage()`: 429 → the
+  daily-quota message, 503 → "the muse is busy", status 0 → renders the
+  client-authored `detail` string verbatim (the connection-lost /
+  can't-reach-backend copy from `lib/api.ts`), anything else → a generic
+  "Something went wrong — tap to retry." fallback.
+  **Slice C additions:** the root is now a flex `View` with the scene/options
+  `ScrollView` above and the `PushToTalk` bar pinned in a `pttArea` `View`
+  BELOW it, outside the ScrollView, so the mic stays visible while scrolling
+  story text; a "← Home" `Pressable` (`router.back()`) sits in a header row
+  above the ScrollView. Story keeps an `AbortController` ref, created fresh
+  each `runTurn` and threaded into `streamTurn`'s `signal`; an unmount effect
+  calls `abortRef.current?.abort()` (stop billing a screen nobody is
+  watching) and clears any pending confirm timeout. A spoken utterance flows
+  through `handleUtterance`: `matchCard(utterance, options)` decides card vs.
+  free-form, then a confirm bar renders `Heard: "..." → choosing option N`
+  (with that card visually highlighted) or `→ steering the story`; a 1.5s
+  timeout auto-fires `handleChoose` with either `options[matchedIndex]` or the
+  raw utterance — the SAME `handleChoose`/`runTurn` path option-card taps use,
+  so the turn clock, frozen-retry object, and overlap guard are inherited for
+  free — or a Cancel button clears the pending timeout instead. The
+  `PushToTalk` bar is `disabled` while streaming or while a confirm is
+  pending.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
@@ -354,22 +377,72 @@ deviation from the original spec's `app/`).
   (forward-compat with future backend events) — malformed JSON in ANY frame,
   known event or unknown, still yields a `stream_error`.
 - **`lib/api.ts`** — `getTemplates()` and `streamTurn()`, the app's only two
-  calls into the backend. ONE error channel: a pre-stream plain-HTTP failure
-  (404/403/422), a network failure that never reaches the server (`status: 0`,
-  "Can't reach the storyteller. Is the backend running?"), and a connection
-  that drops mid-stream after tokens already arrived (`status: 0`,
-  "Connection lost mid-story. Tap to retry.") all surface through the SAME
-  `stream_error` event that real backend `error` frames use — the UI renders
-  exactly one failure path, never a raw thrown exception.
+  calls into the backend. `streamTurn(body, opts?: { signal?: AbortSignal })`
+  (slice C) takes an optional `AbortSignal`: a deliberate abort — an
+  `AbortError` thrown by the initial `fetch` OR one raised mid-read while
+  consuming the response body — ends the generator SILENTLY, never as a
+  `stream_error`; `reader.cancel()` runs best-effort in a `finally` regardless
+  of how the generator exits, so the HTTP body is always released. Otherwise
+  ONE error channel: a pre-stream plain-HTTP failure (404/403/422), a network
+  failure that never reaches the server (`status: 0`, "Can't reach the
+  storyteller. Is the backend running?"), and a connection that drops
+  mid-stream after tokens already arrived (`status: 0`, "Connection lost
+  mid-story. Tap to retry.") all surface through the SAME `stream_error` event
+  that real backend `error` frames use — the UI renders exactly one failure
+  path, never a raw thrown exception.
 - **`lib/fetch.ts`** — `streamingFetch`, a one-line seam wrapping `expo/fetch`
   (streams response bodies on native; web's native `fetch` already streams).
   Tests mock this single function instead of touching the network.
+- **`lib/voice.ts`** — `getVoiceIn(): VoiceIn`, architecture rule #3 made real
+  (never call a speech service directly). Interface: `available` /
+  `start(cb)` / `stop()` / `abort()` — `stop()` finishes the recognizer and
+  delivers `onFinal`; `abort()` discards the in-flight session with NO
+  `onFinal` at all. Wraps the browser's built-in `SpeechRecognition`
+  (`window.SpeechRecognition` / `webkitSpeechRecognition` — works in Chrome,
+  zero new dependencies); `continuous = true` + `interimResults = true`
+  because hold-to-talk decides when the utterance ends, not the browser's own
+  silence-detection. A second `start()` while one is active `abort()`s the
+  superseded session first (`onend` nulled so it can't deliver a stale final)
+  — the double-start mic-leak guard. A browser with no `SpeechRecognition`
+  global gets a stub object (`available: false`, every method a no-op) rather
+  than throwing. Permission denial (`not-allowed` / `service-not-allowed`)
+  maps to a friendly "Microphone permission denied..." message via
+  `onError`; other recognizer errors pass through verbatim. Privacy note
+  recorded directly in the file: Chrome's recognizer sends audio to Google's
+  servers — dev-acceptable, revisit the wording before launch. The native
+  implementation (`expo-speech-recognition`, needs a dev build) arrives later
+  behind this SAME interface — that task is still pending.
+- **`lib/matchCard.ts`** — `matchCard(utterance, cards): number | null`, a
+  pure function: no network, no LLM (deliberately cheap; upgradeable in
+  isolation later). Two rules, in order: (1) GUARDED ordinals — "second",
+  "option 2", "the last one", or a pick-verb ("pick"/"take"/"choose"/
+  "select"/"go with"/"number"/"card") — checked most-specific-first so "the
+  second one" hits "second" and not "one"; ordinals only fire when the
+  utterance LOOKS like a pick (`<= 4` words OR a pick-word present), because
+  bare words like "first"/"two" show up constantly in narrative steering
+  sentences ("at first she hesitated..."); an ordinal past the end of `cards`
+  returns `null` (out-of-bounds). (2) Word overlap — content words (length >
+  3, stopwords stripped) shared between the utterance and each card; a card
+  wins only with >= 2 overlapping words AND a strictly higher score than the
+  runner-up (a tie, or no card clearing 2, → `null`). `null` from either rule
+  → the caller (Story's `handleUtterance`) treats the utterance as free-form
+  steering rather than a card pick.
 - **`components/StreamingText.tsx`** — the signature word-materialize
   animation (Reanimated `FadeInDown` per word). Contract: append-only — pass
   the FULL accumulated text each render; already-rendered words keep stable
   keys so they never re-animate or disappear, only new words fade/rise in.
   Network-ignorant: same input whether fed by live SSE, mock mode, or a test
   fixture.
+- **`components/PushToTalk.tsx`** — hold-to-talk `Pressable` behind
+  `VoiceIn`: `onPressIn` → `voice.start()`, `onPressOut` → `voice.stop()`.
+  Renders NOTHING when `voice.available` is false — no dead mic button on
+  unsupported browsers. The live interim transcript renders as plain `Text`,
+  deliberately NOT `StreamingText` — its append-only contract would break on
+  interim speech that rewrites itself mid-utterance. Inline mic-permission /
+  recognition errors render below the button. A `compact` prop switches from
+  Story's full "🎤 Hold to talk" bar to an icon-only round button for Home; an
+  overridable `testID` (default `"ptt-button"`) lets Home reuse the component
+  under its own `"premise-mic"` testID.
 - **Env config**: `EXPO_PUBLIC_API_URL` (backend base URL — LAN IP, not
   `localhost`, when running on a phone via Expo Go) and `EXPO_PUBLIC_USE_MOCK`
   (`1` routes `streamTurn` to `/continue/stream?mock=true`, the backend's
@@ -381,26 +454,46 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **30 tests** across 6 suites):
+- Tests (jest-expo preset, `restoreMocks: true`, **60 tests** across 8 suites):
   `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
   separator-split cases, malformed JSON, unknown events);
   `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
-  status-0 connection-loss and pre-stream-404 cases); `lib/__tests__/smoke.test.ts`;
+  status-0 connection-loss and pre-stream-404 cases, plus — new (slice C) —
+  the `AbortSignal` passthrough: a deliberate abort on the initial fetch and a
+  mid-stream-read abort both end the generator silently with no
+  `stream_error`, and the signal is threaded through to `fetch` with
+  `reader.cancel()` on early exit); `lib/__tests__/smoke.test.ts`;
+  `lib/__tests__/voice.test.ts` (new — `getVoiceIn`: unavailable with no
+  `SpeechRecognition` global, interim transcripts streaming then a final
+  delivered on `stop()`, `abort()` discarding everything with no final,
+  permission-denial mapped to a friendly message, a second `start()`
+  aborting the superseded session with no orphaned mic); `lib/__tests__/matchCard.test.ts`
+  (new — guarded ordinals incl. "the last one" and out-of-bounds, bare
+  ordinal words inside long sentences NOT matching, pick-verbs unlocking
+  ordinals in longer utterances, word-overlap picking a clear winner,
+  ambiguous/gibberish/empty utterances all returning `null`);
   `components/__tests__/StreamingText.test.tsx` (append-only rendering,
   paragraph breaks); `app/__tests__/index.test.tsx` (card-per-template, seed
-  tap, load-failure retry, and — new — passing the chosen length to the story
-  route); `app/__tests__/story.test.tsx` (full turn loop, option cards
+  tap, load-failure retry, passing the chosen length to the story route, and
+  — new (slice C) — the mic filling the premise input with the spoken
+  transcript); `app/__tests__/story.test.tsx` (full turn loop, option cards
   tracking arrival count, mid-stream error keeps partial text, the status-0
   connection-lost detail rendering verbatim, 429 daily-quota message, retry
-  re-runs the same turn, overlapping-tap guard, and — new — every request
-  carrying `turn`/`length` and retry never advancing the turn number); a
-  `resolveStoryLength` unit-test block (4 tests) pinning the total fallback to
-  `"short"` for an invalid string, an array (duplicated query param), and a
-  missing value. Gemini is never reached from these tests — the backend has
-  its own separate suite.
+  re-runs the same turn, overlapping-tap guard, every request carrying
+  `turn`/`length` and retry never advancing the turn number, and — new
+  (slice C) — a push-to-talk block: aborting the in-flight stream on unmount,
+  a spoken ordinal picking a card and auto-firing after the confirm window,
+  unmatched speech steering the story free-form, Cancel inside the confirm
+  window discarding the utterance, PTT disabled while a turn is streaming, a
+  mic-permission error rendering inline, and the "← Home" back control
+  existing); a `resolveStoryLength` unit-test block (4 tests) pinning the
+  total fallback to `"short"` for an invalid string, an array (duplicated
+  query param), and a missing value. Gemini is never reached from these
+  tests — the backend has its own separate suite.
   Run: `cd client && npx jest --watchAll=false`.
-- Verified 2026-07-03: `npx tsc --noEmit` clean; `npx expo export --platform web`
-  produces a static bundle (`client/dist/`, git-ignored) with no errors.
+- Verified 2026-07-04: `npx jest --watchAll=false` → 60/60 passing across 8
+  suites; `npx tsc --noEmit` clean; `npx expo export --platform web` produces
+  a static bundle (`client/dist/`, git-ignored) with no errors.
 
 ## Environment / how to run
 
@@ -429,7 +522,11 @@ The approved phase plan lives in
    narration v1 (quality TTS ~$5 + device-TTS fallback), abortable playback.
    Slice A (backend SSE streaming + mock mode) DONE. Slice B (Expo app: screens,
    `lib/` bridge, StreamingText animation) DONE — see "Client app (`client/`)"
-   above. Slice C (push-to-talk) NEXT; slice D (narration v1) after that.
+   above. Slice C (push-to-talk: `VoiceIn` abstraction, `matchCard`, the PTT
+   bar + confirm-bar flow, abort plumbing) is BROWSER-COMPLETE — see "Client
+   app (`client/`)" above; the native build (`expo-speech-recognition` behind
+   the same `VoiceIn` interface) is still pending, blocked on the user's phone
+   OS decision. Slice D (narration v1) next.
 3. **Phase 3: product core** — story persistence (SQLite, story IDs), voice-driven
    editing with morph animation, prompt caching, latency/failure UX.
 4. **Phase 4: expressive narration** — streamed audio, per-genre voices, loose sync.
