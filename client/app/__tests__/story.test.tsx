@@ -30,13 +30,16 @@ describe("Story", () => {
     await waitFor(() => expect(getByText(/cracked/)).toBeTruthy());
     expect(getByText("Go north")).toBeTruthy();
     expect(getByText("Go south")).toBeTruthy();
-    expect(spy).toHaveBeenCalledWith({
-      template_id: "fantasy",
-      summary: "A dragon egg hatches.",
-      chosen_scenario: "Open the story.",
-      turn: 1,
-      length: "short",
-    });
+    expect(spy).toHaveBeenCalledWith(
+      {
+        template_id: "fantasy",
+        summary: "A dragon egg hatches.",
+        chosen_scenario: "Open the story.",
+        turn: 1,
+        length: "short",
+      },
+      expect.anything()
+    );
   });
 
   it("tapping an option runs the next turn with the updated summary", async () => {
@@ -59,13 +62,16 @@ describe("Story", () => {
     await waitFor(() => getByText("Option A"));
     fireEvent.press(getByText("Option A"));
     await waitFor(() => getByText("Option B"));
-    expect(spy).toHaveBeenLastCalledWith({
-      template_id: "fantasy",
-      summary: "sum-1",
-      chosen_scenario: "Option A",
-      turn: 2,
-      length: "short",
-    });
+    expect(spy).toHaveBeenLastCalledWith(
+      {
+        template_id: "fantasy",
+        summary: "sum-1",
+        chosen_scenario: "Option A",
+        turn: 2,
+        length: "short",
+      },
+      expect.anything()
+    );
     // scene one is still on screen (finished scenes persist)
     expect(getByText(/Scene one/)).toBeTruthy();
   });
@@ -184,6 +190,30 @@ describe("Story", () => {
     await waitFor(() => getByText(/Fresh/));
     expect(spy.mock.calls[0][0].turn).toBe(1);
     expect(spy.mock.calls[1][0].turn).toBe(1); // retry re-sends the SAME turn
+  });
+
+  it("aborts the in-flight stream on unmount", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    let release: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+
+    jest.spyOn(api, "streamTurn").mockImplementation(function (
+      _req: unknown,
+      opts?: { signal?: AbortSignal }
+    ) {
+      capturedSignal = opts?.signal;
+      return (async function* () {
+        yield { type: "token", t: "Slow " } as const;
+        await gate; // stream stays open
+      })() as never;
+    });
+
+    const { getByText, unmount } = render(<Story />);
+    await waitFor(() => getByText(/Slow/));
+    expect(capturedSignal?.aborted).toBe(false);
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
+    release!();
   });
 });
 

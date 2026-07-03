@@ -33,7 +33,10 @@ export async function getTemplates(): Promise<Template[]> {
  * over HTTP 200. Plain HTTP errors (404/403/422 before the stream) are
  * mapped into the SAME stream_error channel so the UI has ONE error path.
  */
-export async function* streamTurn(body: TurnRequest): AsyncGenerator<StreamEvent> {
+export async function* streamTurn(
+  body: TurnRequest,
+  opts?: { signal?: AbortSignal }
+): AsyncGenerator<StreamEvent> {
   const url = `${API_URL}/continue/stream${USE_MOCK ? "?mock=true" : ""}`;
   let res: Response;
   try {
@@ -41,9 +44,15 @@ export async function* streamTurn(body: TurnRequest): AsyncGenerator<StreamEvent
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: opts?.signal,
     });
   } catch (e) {
-    yield { type: "stream_error", status: 0, detail: "Can't reach the storyteller. Is the backend running?" };
+    if ((e as Error)?.name === "AbortError") return; // deliberate cancel: silent
+    yield {
+      type: "stream_error",
+      status: 0,
+      detail: "Can't reach the storyteller. Is the backend running?",
+    };
     return;
   }
 
@@ -57,8 +66,9 @@ export async function* streamTurn(body: TurnRequest): AsyncGenerator<StreamEvent
   }
 
   const parser = new SSEParser();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   try {
-    const reader = res.body!.getReader();
+    reader = res.body!.getReader();
     const decoder = new TextDecoder();
     while (true) {
       const { done, value } = await reader.read();
@@ -71,12 +81,17 @@ export async function* streamTurn(body: TurnRequest): AsyncGenerator<StreamEvent
     for (const ev of parser.feed(decoder.decode())) {
       yield ev;
     }
-  } catch {
-    // Mid-stream connection loss: same error channel as everything else.
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") return; // aborted mid-stream: silent
     yield {
       type: "stream_error",
       status: 0,
       detail: "Connection lost mid-story. Tap to retry.",
     };
+  } finally {
+    // Best-effort: release the HTTP body if the consumer exits early or errors.
+    try {
+      reader?.cancel();
+    } catch {}
   }
 }

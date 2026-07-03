@@ -40,14 +40,19 @@ export default function Story() {
   const [pendingTurn, setPendingTurn] = useState<TurnRequest | null>(null);
   const [error, setError] = useState<StreamError | null>(null);
   const [turnCount, setTurnCount] = useState(0);
+  const [isStreaming, setIsStreaming] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const startedRef = useRef(false);
   const streamingRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   async function runTurn(req: TurnRequest) {
     // Guard against overlapping turns
     if (streamingRef.current) return;
     streamingRef.current = true;
+    setIsStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       setError(null);
@@ -57,7 +62,7 @@ export default function Story() {
       setTurnCount((n) => n + 1);
 
       let sceneText = "";
-      for await (const ev of streamTurn(req)) {
+      for await (const ev of streamTurn(req, { signal: controller.signal })) {
         if (ev.type === "token") {
           sceneText += ev.t;
           setCurrentScene(sceneText);
@@ -73,8 +78,16 @@ export default function Story() {
       }
     } finally {
       streamingRef.current = false;
+      setIsStreaming(false);
+      abortRef.current = null;
     }
   }
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort(); // stop billing a screen nobody is watching
+    };
+  }, []);
 
   useEffect(() => {
     if (startedRef.current) return;
