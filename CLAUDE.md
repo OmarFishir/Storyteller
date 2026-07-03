@@ -169,7 +169,12 @@ FastAPI server in `main.py`:
   an updated summary (contract: stay under `SUMMARY_WORDS[length]` words,
   preserve named characters/facts/unresolved threads) and proposes the next 3
   options — each 3-4 sentences, meaningfully different, steered toward the
-  NEXT beat's `{name} — {guidance}` (or the epilogue's, past the arc's end).
+  beat the NEXT TURN will land in: `story_beats.select_beats(structure, turn
+  + 1, length)`'s CURRENT beat, not the structurally-next one — the same beat
+  the arc is still lingering in on medium/long (options generated at turn t
+  are consumed at turn t+1, which is often still inside turn t's beat), the
+  following beat only on that beat's last turn, and the epilogue past the
+  arc's end.
   Budgets scale with `length`: `SCENE_BUDGETS = {"short": 600, "medium": 800,
   "long": 1000}` (room for environmental detail), `FOLD_BUDGET = 800` (flat —
   sized for 3 × 3-4-sentence options plus the summary), `SUMMARY_WORDS =
@@ -231,7 +236,9 @@ reading/export view arrives with persistence in Phase 3. Full design:
 `docs/superpowers/specs/2026-07-03-story-structure-design.md`.
 
 Tests in `tests/test_api.py`, `tests/test_templates.py`, and `tests/test_beats.py`
-(pytest + FastAPI `TestClient`, **68 tests**): health check; retry-then-succeed
+(pytest + FastAPI `TestClient`, **69 tests** — incl. the corrected next-TURN
+fold-steering pinning test above and a stream-path scene-budget pin): health
+check; retry-then-succeed
 and retry-exhaustion → 503; 429-without-retry and other-4xx passthrough;
 empty-response → 502; /suggest shape bare and with `template_id` (404 on
 unknown; prompt ORDER pinned: static prompt → genre style → premise, the
@@ -325,8 +332,12 @@ deviation from the original spec's `app/`).
   archives the finished scene and renders however many option cards the
   server actually sent (not hardcoded to 3), a `streamingRef` flag ignores a
   second tap while a turn is already streaming. Every request (mount-effect
-  and each chosen option) carries `turn: scenes.length + 1` and the
-  `length` read from the route param — the same carry-it-yourself pattern as
+  and each chosen option) carries `turn: scenes.length + 1` and the `length`
+  read from the route param via `resolveStoryLength()` — the route param is
+  an unchecked value (URL-editable on web, and can arrive as an array if the
+  query string duplicates the key), so anything other than exactly `"short"`
+  / `"medium"` / `"long"` falls back to `"short"` rather than being cast
+  straight through to the backend — the same carry-it-yourself pattern as
   the backend's `summary`; retry re-sends the frozen, already-built request
   object unchanged, so retrying never advances the turn counter or changes
   the beat the story is on. A `stream_error` event drives a retry banner via
@@ -370,7 +381,7 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **26 tests** across 6 suites):
+- Tests (jest-expo preset, `restoreMocks: true`, **30 tests** across 6 suites):
   `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
   separator-split cases, malformed JSON, unknown events);
   `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
@@ -382,8 +393,11 @@ deviation from the original spec's `app/`).
   tracking arrival count, mid-stream error keeps partial text, the status-0
   connection-lost detail rendering verbatim, 429 daily-quota message, retry
   re-runs the same turn, overlapping-tap guard, and — new — every request
-  carrying `turn`/`length` and retry never advancing the turn number). Gemini
-  is never reached from these tests — the backend has its own separate suite.
+  carrying `turn`/`length` and retry never advancing the turn number); a
+  `resolveStoryLength` unit-test block (4 tests) pinning the total fallback to
+  `"short"` for an invalid string, an array (duplicated query param), and a
+  missing value. Gemini is never reached from these tests — the backend has
+  its own separate suite.
   Run: `cd client && npx jest --watchAll=false`.
 - Verified 2026-07-03: `npx tsc --noEmit` clean; `npx expo export --platform web`
   produces a static bundle (`client/dist/`, git-ignored) with no errors.
