@@ -335,9 +335,9 @@ deviation from the original spec's `app/`).
   `StreamingText`, `turn_complete` archives the finished scene and renders
   however many option cards the server actually sent (not hardcoded to 3), a
   `streamingRef` flag ignores a second tap while a turn is already streaming;
-  a reactive `isStreaming` state mirrors that same ref (both flip together in
-  `runTurn`'s try/finally) so streaming state can drive UI, not just gate
-  logic. Every request (mount-effect and each chosen option) carries
+  a reactive `isStreaming` state mirrors that same ref (set together when a turn
+  starts, reset together in `runTurn`'s `finally`) so streaming state can drive
+  UI, not just gate logic. Every request (mount-effect and each chosen option) carries
   `turn: scenes.length + 1` and the `length` read from the route param via
   `resolveStoryLength()` — the route param is an unchecked value (URL-editable
   on web, and can arrive as an array if the query string duplicates the key),
@@ -415,7 +415,7 @@ deviation from the original spec's `app/`).
 - **`lib/matchCard.ts`** — `matchCard(utterance, cards): number | null`, a
   pure function: no network, no LLM (deliberately cheap; upgradeable in
   isolation later). Two rules, in order: (1) GUARDED ordinals — "second",
-  "option 2", "the last one", or a pick-verb ("pick"/"take"/"choose"/
+  "option 2", "the last one", or a pick-verb ("pick"/"take"/"choose"/"option"/
   "select"/"go with"/"number"/"card") — checked most-specific-first so "the
   second one" hits "second" and not "one"; ordinals only fire when the
   utterance LOOKS like a pick (`<= 4` words OR a pick-word present), because
@@ -439,7 +439,7 @@ deviation from the original spec's `app/`).
   unsupported browsers. The live interim transcript renders as plain `Text`,
   deliberately NOT `StreamingText` — its append-only contract would break on
   interim speech that rewrites itself mid-utterance. Inline mic-permission /
-  recognition errors render below the button. A `compact` prop switches from
+  recognition errors render above the button. A `compact` prop switches from
   Story's full "🎤 Hold to talk" bar to an icon-only round button for Home; an
   overridable `testID` (default `"ptt-button"`) lets Home reuse the component
   under its own `"premise-mic"` testID.
