@@ -62,6 +62,10 @@ export function getVoiceIn(): VoiceIn {
   return {
     available: true,
     start(cb: VoiceCallbacks) {
+      if (rec) {
+        rec.onend = null; // discard the superseded session: no final delivery
+        rec.abort();
+      }
       rec = new Ctor();
       rec.interimResults = true;
       rec.continuous = true; // hold-to-talk: we decide when it ends, not silence

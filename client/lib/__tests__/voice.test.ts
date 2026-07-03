@@ -109,4 +109,18 @@ describe("getVoiceIn (web)", () => {
     FakeRecognition.instances[0].onerror!({ error: "not-allowed" });
     expect(c.errors[0]).toMatch(/microphone permission/i);
   });
+
+  it("a second start aborts the superseded session - no orphaned mic", () => {
+    const voice = getVoiceIn();
+    const c1 = cb();
+    voice.start(c1);
+    FakeRecognition.instances[0].onresult!(
+      resultEvent([{ text: "orphaned words", final: true }])
+    );
+    const c2 = cb();
+    voice.start(c2);
+    expect(FakeRecognition.instances[0].aborted).toBe(true);
+    expect(c1.finals).toEqual([]); // superseded session delivers no final
+    expect(FakeRecognition.instances[1].started).toBe(true);
+  });
 });
