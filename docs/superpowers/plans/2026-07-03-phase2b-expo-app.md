@@ -575,6 +575,7 @@ git commit -m "feat(client): Home screen — genre cards, premise seeds, begin s
 - On `turn_complete`: push `currentScene` into `scenes[]`, clear it, set `summary` to the new value, render one tappable card per scenario (however many arrive).
 - Tapping a card: run the next turn with `chosen_scenario` = card text and the CURRENT summary; cards disappear while streaming.
 - On `stream_error`: keep all text already shown (including the partial `currentScene`); show a message + retry button. Message by status: 429 → "Out of muse for today. Try again tomorrow."; 503 → "The muse is busy — tap to retry."; anything else (incl. 0/404/500) → "Something went wrong — tap to retry.". Retry re-runs the SAME turn (same summary + chosen_scenario); on retry, the partial `currentScene` is reset (the fresh stream replaces it).
+  *(Amended post final review: status-0 errors render their client-authored `error.detail` — e.g. "Connection lost mid-story. Tap to retry." — since the client wrote that copy itself; other non-429/503 statuses keep the generic message. Slice C's abort work must swallow AbortError so a deliberate cancel doesn't paint this as connection loss.)*
 - The pending turn's request (summary + chosen_scenario) must therefore be kept in state until it completes.
 
 - [ ] **Step 1: Write the failing tests**
