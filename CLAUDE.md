@@ -107,30 +107,75 @@ FastAPI server in `main.py`:
   (prompt-injection text) stays server-side, never returned to the client.
   Templates are DATA — one `templates/*.json` file per genre — loaded fail-loud
   at startup by `story_templates.py` (missing keys, empty `premise_seeds`, or a
-  duplicate id crashes on boot, not mid-request).
+  duplicate id crashes on boot, not mid-request). Each template also carries an
+  OPTIONAL `structure` block — a sourced narrative arc as an ordered list of
+  beats (`{name, guidance}`) — validated the same fail-loud way when present
+  (non-empty `source` URL; non-empty `beats`; every beat a non-empty `name` +
+  `guidance`) and, like `style`, never returned by this endpoint. All four
+  shipped genres have one: `noir` → the 12-Step Mystery Formula (12 beats,
+  storytellingdb.com); `fantasy` → the Hero's Journey per Vogler's *The
+  Writer's Journey* (12 beats, Wikipedia); `fairytale` → Kenn Adams's Story
+  Spine (8 beats, via an NPR piece); `scifi` → Dan Harmon's Story Circle (8
+  beats, via a Reedsy guide). A template without `structure` still works
+  exactly as before (no beat line in prompts) — the hook for future
+  custom/unstructured genres.
+- `story_beats.py` — `select_beats(structure, turn, length) -> (current, next) | None`,
+  the pure function turning "which turn, how long a story" into "which
+  narrative beat" — stateless, the same carry-it-yourself pattern as the
+  running summary. `TURNS_PER_BEAT = {"short": 1, "medium": 2, "long": 3}` sets
+  how many scenes the arc spends inside each beat — this is what STRETCHES a
+  longer story instead of truncating it: `beat_index = (turn - 1) //
+  TURNS_PER_BEAT[length]`. Once `beat_index` runs past the structure's last
+  beat, `select_beats` returns a built-in `EPILOGUE_BEAT` (not per-template)
+  forever after — **stories never hard-stop**: past the arc's end the guidance
+  leans toward winding down and resolving threads, but generation keeps going
+  for as long as the reader keeps choosing. A `None` structure (a genre with no
+  arc) makes `select_beats` return `None`, and every beat-aware prompt piece
+  below no-ops cleanly.
 - `POST /suggest` — `{"premise": "...", "template_id": "..." (optional)}` →
   `{"scenarios": ["...","...","..."]}`. Uses a static `SYSTEM_PROMPT` forcing raw
   JSON, plus `parse_scenarios()` which defensively strips code fences and
-  validates a list of strings (raises a clean 502 on bad output). When
-  `template_id` is given, `get_template_or_404()` injects that genre's `style`
-  into the prompt (404 on an unknown id); omitted, `/suggest` behaves as before.
+  validates a list of strings (raises a clean 502 on bad output). Each option
+  is 3-4 sentences and vivid (`max_output_tokens=600`, up from 300 in the
+  1-2-sentence era). When `template_id` is given, `get_template_or_404()`
+  injects that genre's `style` into the prompt (404 on an unknown id); omitted,
+  `/suggest` behaves as before.
 - `POST /expand` — `{"scenario": "...", "instruction": "..."}` →
   `{"original": "...", "expanded": "..."}`. Refines a chosen scenario per a
   plain-English instruction ("make it darker"). Static `EXPAND_PROMPT`,
   `max_output_tokens=600`, `temperature=0.8`. Returns prose directly (NO JSON
   parsing — simpler than /suggest). Echoes `original` from the request rather than
   paying the model to reproduce it.
-- `POST /continue` — `{"template_id": "...", "summary": "...", "chosen_scenario": "..."}`
-  → `{"scene": "...", "summary": "...", "scenarios": [...]}`. The running-summary
-  turn — the first cost-control piece actually wired up: the client carries the
-  summary, so the backend stays stateless and never resends full story history.
-  Two Gemini calls per turn: (1) the "storyteller" (`STORY_PROMPT`,
-  `max_output_tokens=600`, `temperature=0.9`) writes the next scene as pure prose
-  — no JSON, so creative writing never fights JSON formatting; (2) the "scribe"
-  (`FOLD_PROMPT`, `max_output_tokens=400`, `temperature=0.7`) folds the new scene
-  into an updated summary (contract: stay under ~150 words, preserve named
-  characters/facts/unresolved threads) and proposes the next 3 options. Reuses
-  `parse_model_json()` and `get_template_or_404()` from `/suggest`.
+- `POST /continue` — `{"template_id": "...", "summary": "...", "chosen_scenario": "...",
+  "turn": 1, "length": "short"}` → `{"scene": "...", "summary": "...", "scenarios": [...]}`.
+  The running-summary turn — the first cost-control piece actually wired up: the
+  client carries the summary, so the backend stays stateless and never resends
+  full story history. `turn` (1-based scene number, default `1`, `ge=1` → 422
+  below that) and `length` (`"short" | "medium" | "long"`, default `"short"`)
+  are carried by the client on every turn too (same carry-it-yourself pattern
+  as `summary`) and drive beat selection + the token budgets below; the
+  defaults reproduce pre-structure behavior for any old caller. Two Gemini
+  calls per turn: (1) the "storyteller" (`build_scene_prompt`,
+  `max_output_tokens=SCENE_BUDGETS[length]`, `temperature=0.9`) writes the next
+  scene as pure prose — no JSON, so creative writing never fights JSON
+  formatting — assembled in caching-friendly order: static `STORY_PROMPT` →
+  genre style → current beat's `{name} — {guidance}` (via
+  `story_beats.select_beats`, only when the template has a `structure`) →
+  story-so-far → chosen direction. `STORY_PROMPT` itself now also carries an
+  environmental-craft instruction: ground every scene in concrete sensory
+  detail (sound, light, weather, texture) the way published fiction does, not
+  just plot-advancing dialogue. (2) the "scribe" (`build_fold_prompt`,
+  `max_output_tokens=FOLD_BUDGET`, `temperature=0.7`) folds the new scene into
+  an updated summary (contract: stay under `SUMMARY_WORDS[length]` words,
+  preserve named characters/facts/unresolved threads) and proposes the next 3
+  options — each 3-4 sentences, meaningfully different, steered toward the
+  NEXT beat's `{name} — {guidance}` (or the epilogue's, past the arc's end).
+  Budgets scale with `length`: `SCENE_BUDGETS = {"short": 600, "medium": 800,
+  "long": 1000}` (room for environmental detail), `FOLD_BUDGET = 800` (flat —
+  sized for 3 × 3-4-sentence options plus the summary), `SUMMARY_WORDS =
+  {"short": 150, "medium": 200, "long": 250}` (a longer story needs more room
+  to retain names/threads). Reuses `parse_model_json()`/`validate_turn_payload()`
+  and `get_template_or_404()` from `/suggest`.
 - `POST /continue/stream` — SSE twin of `/continue`, same request body, plus an
   optional `?mock=true`. Streams `scene_token` frames (`{"t": "..."}`) as the
   scene is generated, then one `scene_token*` → `turn_complete`
@@ -140,9 +185,15 @@ FastAPI server in `main.py`:
   and the clean 429 only apply BEFORE the first byte of the scene; once
   streaming has started, any failure (mid-stream 5xx, 429 from the follow-up
   fold call, etc.) becomes a terminal error frame instead of a retry. Mock mode
-  (`?mock=true`, gated by `DEV_MOCK_ENABLED=1` in `.env`, 403 if unset) streams a
-  canned scene word-by-word with realistic pacing and a canned `turn_complete`
-  — zero Gemini calls, doubles as the client-animation dev fixture.
+  (`?mock=true`, gated by `DEV_MOCK_ENABLED=1` in `.env`, 403 if unset) streams
+  one of 3 canned scenes word-by-word with realistic pacing and a canned
+  `turn_complete`, self-advancing statelessly through that 3-scene cycle via a
+  `"(mock turn N)"` marker embedded in the `summary` the client carries back —
+  the same carry-it-yourself trick as the real engine (fixed after live play
+  made a repeating scene indistinguishable from a duplication bug) — zero
+  Gemini calls, doubles as the client-animation dev fixture. Mock mode ignores
+  `turn`/`length` entirely — it exercises the pipe, not the prompts (verified:
+  `turn=5, length="long"` still streams the correct next canned scene).
 - `call_gemini(contents, max_tokens, temperature, label="unlabeled")` — the ONE
   shared helper every endpoint uses. Error handling (hardened after the Phase 1
   final review): retries transient `errors.ServerError` (5xx) up to 3 times with
@@ -170,17 +221,36 @@ FastAPI server in `main.py`:
   never break the request it's measuring) but warns on stderr so a dead meter is
   visible. The whole "dashboard" for now is opening the file.
 
-Tests in `tests/test_api.py` and `tests/test_templates.py` (pytest + FastAPI
-`TestClient`, **45 tests**): health check; retry-then-succeed and
-retry-exhaustion → 503; 429-without-retry and other-4xx passthrough; empty-response
-→ 502; /suggest shape bare and with `template_id` (404 on unknown; prompt ORDER
-pinned: static prompt → genre style → premise, the caching contract); /expand
-shape and validation (422); /continue's scene+summary+scenarios shape, call order
-(`scene` then `fold`), per-call cost caps pinned ((600,0.9)/(400,0.7)), its
-404/422/502 paths incl. structurally-bad scribe JSON; `parse_model_json`
-fence-stripping and non-object rejection; usage-log appends, logging-failure
-resilience + stderr warning; the template loader's validation (missing keys,
-duplicate ids, empty dir) plus the real `templates/` dir loading all four genres;
+**Hard invariant (owner requirement — no future phase may violate):** the
+canonical story is the verbatim sequence of scenes exactly as generated. The
+running summary is AI working memory ONLY — it exists so the backend never
+resends full history (the cost spine above) and it never appears in any
+reading experience. "The full story" = joining the stored scenes verbatim,
+zero summarization. Scenes live in client state per session today; the
+reading/export view arrives with persistence in Phase 3. Full design:
+`docs/superpowers/specs/2026-07-03-story-structure-design.md`.
+
+Tests in `tests/test_api.py`, `tests/test_templates.py`, and `tests/test_beats.py`
+(pytest + FastAPI `TestClient`, **68 tests**): health check; retry-then-succeed
+and retry-exhaustion → 503; 429-without-retry and other-4xx passthrough;
+empty-response → 502; /suggest shape bare and with `template_id` (404 on
+unknown; prompt ORDER pinned: static prompt → genre style → premise, the
+caching contract); /expand shape and validation (422); /continue's
+scene+summary+scenarios shape, call order (`scene` then `fold`), per-call cost
+caps pinned ((600,0.9)/(800,0.7)), its 404/422/502 paths incl.
+structurally-bad scribe JSON, plus 422 on a bad `turn`/`length`;
+`parse_model_json` fence-stripping and non-object rejection; usage-log
+appends, logging-failure resilience + stderr warning; the template loader's
+validation (missing keys, duplicate ids, empty dir, and — new — the optional
+`structure` block: missing `source`, empty `beats`, a beat missing
+`name`/`guidance` all fail loud) plus the real `templates/` dir loading all
+four genres AND their sourced structures; `story_beats.select_beats`'s pure
+turn/length → beat math (short/medium/long turns-per-beat, epilogue forever
+past the last beat, `None` structure → `None`); `build_scene_prompt`/
+`build_fold_prompt` injecting the current/next beat's name+guidance and the
+environmental-craft instruction at the right turns and lengths, including the
+epilogue case past the arc; the scene token budget scaling with `length`; the
+9 canned mock scenarios mechanically pinned to 3-4 sentences each;
 `call_gemini_stream`'s chunk yielding + usage logging, retry-before-first-chunk,
 429-no-retry, empty-stream 502, and usage logged on early close (client
 disconnect mid-stream); `/continue/stream` mock mode (env-gate 403 when unset,
@@ -214,6 +284,20 @@ mid-stream failure → error-frame contract works against the real API; the
 full happy path (`scene_token*` → `turn_complete` against live Gemini) should
 be re-attempted on a fresh-quota day before slice B's end-to-end test.
 
+Live-verified structured `/continue` (2026-07-03): one real turn against
+`template_id="noir"`, `turn=1`, `length="short"` returned 200 (quota happened
+to allow it this run — the free-tier daily cap isn't guaranteed available; a
+429 here is an accepted contingency, not a defect). The scene read as a
+genuine mystery OPENING (beat 1, "Disclose the Mystery"): a detective meets a
+mayoral aide in a rain-soaked alley and is handed a sealed envelope tied to a
+crime the mayor wants "gone. Permanently." All 3 returned options pushed
+toward investigating that envelope (open it now, take it back for controlled
+analysis, or press the aide for more) — exactly the direction beat 2, "Set
+the Sleuth on the Path", steers toward. The full multi-turn arc (an early beat
+through the epilogue) still can't be verified on the free tier — a short noir
+arc alone is 24 Gemini calls — and remains blocked pending a paid tier, per
+the design spec.
+
 Supporting files: `requirements.txt` (fastapi, uvicorn, python-dotenv, google-genai,
 pytest), `.env.example` (template), real `.env` (holds `GEMINI_API_KEY`, git-ignored),
 `.gitignore` (ignores `.env`, `venv/`, `__pycache__`, `logs/`), `story_templates.py`
@@ -232,17 +316,24 @@ deviation from the original spec's `app/`).
 
 - **Screens** (`client/app/`): `index.tsx` (Home) — loads `GET /templates`,
   renders a genre card per template plus tappable premise-seed chips that fill
-  the premise box, "Begin the story" routes to `/story`. `story.tsx` (Story) —
-  runs the turn loop against `POST /continue/stream`: an effect kicks off the
-  opening turn on mount, `token` events accumulate into `StreamingText`,
-  `turn_complete` archives the finished scene and renders however many option
-  cards the server actually sent (not hardcoded to 3), a `streamingRef` flag
-  ignores a second tap while a turn is already streaming. A `stream_error`
-  event drives a retry banner via `errorMessage()`: 429 → the daily-quota
-  message, 503 → "the muse is busy", status 0 → renders the client-authored
-  `detail` string verbatim (the connection-lost / can't-reach-backend copy
-  from `lib/api.ts`), anything else → a generic "Something went wrong — tap
-  to retry." fallback.
+  the premise box, a story-length picker (chip row: `Short` / `Medium` /
+  `Long`, default `Short`, styled like the genre-card selection highlight),
+  "Begin the story" routes to `/story` carrying the chosen `length` as a route
+  param alongside the template/premise. `story.tsx` (Story) — runs the turn
+  loop against `POST /continue/stream`: an effect kicks off the opening turn
+  on mount, `token` events accumulate into `StreamingText`, `turn_complete`
+  archives the finished scene and renders however many option cards the
+  server actually sent (not hardcoded to 3), a `streamingRef` flag ignores a
+  second tap while a turn is already streaming. Every request (mount-effect
+  and each chosen option) carries `turn: scenes.length + 1` and the
+  `length` read from the route param — the same carry-it-yourself pattern as
+  the backend's `summary`; retry re-sends the frozen, already-built request
+  object unchanged, so retrying never advances the turn counter or changes
+  the beat the story is on. A `stream_error` event drives a retry banner via
+  `errorMessage()`: 429 → the daily-quota message, 503 → "the muse is busy",
+  status 0 → renders the client-authored `detail` string verbatim (the
+  connection-lost / can't-reach-backend copy from `lib/api.ts`), anything else
+  → a generic "Something went wrong — tap to retry." fallback.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
@@ -279,18 +370,20 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **24 tests** across 6 suites):
+- Tests (jest-expo preset, `restoreMocks: true`, **26 tests** across 6 suites):
   `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
   separator-split cases, malformed JSON, unknown events);
   `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
   status-0 connection-loss and pre-stream-404 cases); `lib/__tests__/smoke.test.ts`;
   `components/__tests__/StreamingText.test.tsx` (append-only rendering,
   paragraph breaks); `app/__tests__/index.test.tsx` (card-per-template, seed
-  tap, load-failure retry); `app/__tests__/story.test.tsx` (full turn loop,
-  option cards tracking arrival count, mid-stream error keeps partial text,
-  the status-0 connection-lost detail rendering verbatim, 429 daily-quota
-  message, retry re-runs the same turn, overlapping-tap guard). Gemini is
-  never reached from these tests — the backend has its own separate suite.
+  tap, load-failure retry, and — new — passing the chosen length to the story
+  route); `app/__tests__/story.test.tsx` (full turn loop, option cards
+  tracking arrival count, mid-stream error keeps partial text, the status-0
+  connection-lost detail rendering verbatim, 429 daily-quota message, retry
+  re-runs the same turn, overlapping-tap guard, and — new — every request
+  carrying `turn`/`length` and retry never advancing the turn number). Gemini
+  is never reached from these tests — the backend has its own separate suite.
   Run: `cd client && npx jest --watchAll=false`.
 - Verified 2026-07-03: `npx tsc --noEmit` clean; `npx expo export --platform web`
   produces a static bundle (`client/dist/`, git-ignored) with no errors.
