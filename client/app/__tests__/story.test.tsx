@@ -324,6 +324,36 @@ describe("push-to-talk", () => {
     jest.useRealTimers();
   });
 
+  it("a card tap during the confirm window discards the pending utterance, not the stale spoken one", async () => {
+    jest.useFakeTimers();
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(happyTurn());
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("the second one")); // matches "Ask the voice its name"
+    expect(getByText(/choosing option 2/i)).toBeTruthy();
+
+    // Tap a DIFFERENT card before the 1.5s confirm window elapses.
+    fireEvent.press(getByText("Force the iron door open now"));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    expect(spy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ chosen_scenario: "Force the iron door open now" }),
+      expect.anything()
+    );
+
+    // The stale spoken-utterance timer must not fire a redundant third turn.
+    act(() => jest.advanceTimersByTime(2000));
+    expect(spy).toHaveBeenCalledTimes(2);
+    jest.useRealTimers();
+  });
+
   it("PTT is disabled while a turn is streaming", async () => {
     let release: () => void;
     const gate = new Promise<void>((r) => (release = r));

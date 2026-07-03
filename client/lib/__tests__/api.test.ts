@@ -101,7 +101,10 @@ describe("streamTurn", () => {
             }
             return Promise.reject(abortErr);
           },
-          cancel: jest.fn(),
+          // Rejected on purpose: exercises the finally block's swallow of a
+          // cancel() rejection (the stream already errored/aborted upstream),
+          // proving it never surfaces as an unhandled promise rejection.
+          cancel: jest.fn(() => Promise.reject(new Error("stream already errored"))),
         }),
       },
     } as unknown as Response;
@@ -113,7 +116,7 @@ describe("streamTurn", () => {
   });
 
   it("passes the AbortSignal through to fetch and cancels the reader on early exit", async () => {
-    const cancel = jest.fn();
+    const cancel = jest.fn(() => Promise.resolve());
     const fakeRes = {
       ok: true,
       status: 200,

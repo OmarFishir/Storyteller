@@ -51,7 +51,7 @@ export function matchCard(utterance: string, cards: string[]): number | null {
   const wordCount = text.split(" ").length;
   const looksLikeAPick = wordCount <= 4 || PICK_WORDS.test(text);
   if (looksLikeAPick) {
-    if (/\blast\b/.test(text)) return cards.length - 1;
+    if (/\blast\b/.test(text)) return cards.length > 0 ? cards.length - 1 : null;
     for (const [re, idx] of ORDINALS) {
       if (re.test(text)) {
         return idx < cards.length ? idx : null;

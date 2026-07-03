@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { getVoiceIn, VoiceIn } from "../lib/voice";
 
@@ -35,6 +35,17 @@ export function PushToTalk({
 
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  // Unmount cleanup: abort any in-flight recognition session so it doesn't
+  // outlive the component (mic hot on a dead screen) and so a late onFinal
+  // can't fire onUtterance into an unmounted screen. abort() is a safe no-op
+  // when idle.
+  useEffect(() => {
+    return () => {
+      voice.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!voice.available) return null;
 

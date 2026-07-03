@@ -91,7 +91,7 @@ export async function* streamTurn(
   } finally {
     // Best-effort: release the HTTP body if the consumer exits early or errors.
     try {
-      reader?.cancel();
+      reader?.cancel()?.catch?.(() => {});
     } catch {}
   }
 }

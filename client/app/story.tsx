@@ -58,6 +58,10 @@ export default function Story() {
     // Guard against overlapping turns
     if (streamingRef.current) return;
     streamingRef.current = true;
+    // A card tap or retry starting a fresh turn must discard any pending
+    // spoken-utterance confirm timer — otherwise it fires 1.5s later and
+    // double-spends a Gemini call via a second handleChoose.
+    cancelConfirm();
     setIsStreaming(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -130,6 +134,13 @@ export default function Story() {
   // way it fires through handleChoose — the SAME path option-card taps use —
   // after a 1.5s confirm window the speaker can cancel.
   const handleUtterance = (utterance: string) => {
+    // Optional hardening: discard any prior pending confirm timer before
+    // arming a new one, so two utterances in quick succession can't both
+    // end up with a live timeout.
+    if (confirmTimeoutRef.current) {
+      clearTimeout(confirmTimeoutRef.current);
+      confirmTimeoutRef.current = null;
+    }
     const matchedIndex = matchCard(utterance, options);
     setConfirmPending({ utterance, matchedIndex });
     confirmTimeoutRef.current = setTimeout(() => {

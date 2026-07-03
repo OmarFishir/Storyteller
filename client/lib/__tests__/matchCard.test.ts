@@ -31,6 +31,10 @@ describe("matchCard - ordinals (guarded)", () => {
   it("out-of-bounds ordinal is null", () => {
     expect(matchCard("the fourth one", CARDS)).toBeNull();
   });
+
+  it("'last' with no cards is null, not -1", () => {
+    expect(matchCard("the last one", [])).toBeNull();
+  });
 });
 
 describe("matchCard - word overlap", () => {
