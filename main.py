@@ -16,6 +16,7 @@ Then it lives at http://127.0.0.1:8000
 
 import os
 import json
+import re
 import sys
 import time
 from collections.abc import Iterator
@@ -149,40 +150,98 @@ Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
 
 
 # --- Mock mode -------------------------------------------------------------
-# Streams a canned scene word-by-word with realistic pacing so the client's
-# animation can be built with ZERO Gemini calls (free, offline, deterministic
-# — it doubles as a test fixture). Gated by DEV_MOCK_ENABLED so it can never
-# exist in a production deploy.
-MOCK_SCENE = (
-    "The lantern guttered as Mira pressed her palm against the cold iron door. "
-    "Somewhere beyond it, water dripped in slow, deliberate beats, like something "
-    "counting.\n\nShe had been warned about the lower stacks — every apprentice "
-    "was — but the map in her satchel showed a corridor that should not exist, "
-    "and Mira had never once managed to leave a wrong map uncorrected."
-)
+# Streams canned scenes word-by-word with realistic pacing so the client's
+# animation can be built AND the loop can be played with ZERO Gemini calls
+# (free, offline, deterministic — doubles as a test fixture). Gated by
+# DEV_MOCK_ENABLED so it can never exist in a production deploy.
+#
+# The mock is stateless like the real engine and self-advances the same way:
+# its turn_complete summary carries a "(mock turn N)" marker; the client sends
+# that summary back on the next turn, telling the mock which scene comes next.
+# (The original single-scene mock repeated identically every turn — which,
+# played live, was indistinguishable from a scene-duplication bug.)
+MOCK_TURNS = [
+    {
+        "scene": (
+            "The lantern guttered as Mira pressed her palm against the cold iron "
+            "door. Somewhere beyond it, water dripped in slow, deliberate beats, "
+            "like something counting.\n\nShe had been warned about the lower stacks "
+            "— every apprentice was — but the map in her satchel showed a corridor "
+            "that should not exist, and Mira had never once managed to leave a "
+            "wrong map uncorrected."
+        ),
+        "summary_base": (
+            "Apprentice mapmaker Mira stands before a cold iron door in the "
+            "forbidden lower stacks, following a corridor missing from every map."
+        ),
+        "scenarios": [
+            "Mira forces the iron door and finds a room where maps draw themselves.",
+            "A voice behind the door asks her, by name, to slide the map underneath.",
+            "The dripping stops — and footsteps begin, approaching from the corridor that shouldn't exist.",
+        ],
+    },
+    {
+        "scene": (
+            "The door swung open at a touch, as if it had only ever been waiting "
+            "for manners. Inside, a round room breathed with candlelight, and on "
+            "a great oak table a map of the kingdom was drawing itself — inklines "
+            "crawling like patient ants toward the edge of the parchment.\n\nEvery "
+            "line was perfect. Every line but one: the corridor Mira stood in was "
+            "being erased, stroke by stroke, behind her."
+        ),
+        "summary_base": (
+            "Mira has entered a hidden chart-room where maps draw themselves — "
+            "and something is erasing the corridor behind her."
+        ),
+        "scenarios": [
+            "Mira grabs the pen mid-stroke and writes the corridor back in.",
+            "She follows the vanishing line out, racing the eraser to the exit.",
+            "She asks the room, aloud, who taught the maps to lie.",
+        ],
+    },
+    {
+        "scene": (
+            "The pen was warm, like a hand recently held. When Mira touched it, "
+            "every candle leaned toward her as though the room had turned to "
+            "listen.\n\n\"Cartographers used to ask permission,\" said a voice from "
+            "under the table — unhurried, papery, amused. A creature made entirely "
+            "of folded maps unbent itself to her exact height and held out the "
+            "corridor she had come by, rolled tight as a scroll. \"Yours, I "
+            "believe. You dropped it when you believed in it.\""
+        ),
+        "summary_base": (
+            "A creature of folded maps has returned the missing corridor to Mira "
+            "and hinted that the kingdom's maps lie by design."
+        ),
+        "scenarios": [
+            "Mira unrolls the corridor right there and walks into what it shows.",
+            "She bargains: the corridor's secret in exchange for fixing the maps.",
+            "She pockets the scroll and pretends not to care what it means.",
+        ],
+    },
+]
 
-MOCK_TURN = {
-    "summary": (
-        "Apprentice mapmaker Mira, investigating a corridor missing from the "
-        "kingdom's maps, stands before a cold iron door in the forbidden lower "
-        "stacks, drawn by her compulsion to correct wrong maps."
-    ),
-    "scenarios": [
-        "Mira forces the iron door and finds a room where maps draw themselves.",
-        "A voice behind the door asks her, by name, to slide the map underneath.",
-        "The dripping stops — and footsteps begin, approaching from the corridor that shouldn't exist.",
-    ],
-}
+_MOCK_MARKER = re.compile(r"\(mock turn (\d+)\)")
 
 
-def _stream_mock():
-    """Yield the canned scene word-by-word, then the canned turn_complete."""
-    words = MOCK_SCENE.split(" ")
+def _stream_mock(summary: str):
+    """Stream the next canned scene, chosen by the marker in the incoming summary."""
+    match = _MOCK_MARKER.search(summary)
+    turn_number = int(match.group(1)) if match else 0
+    mock = MOCK_TURNS[turn_number % len(MOCK_TURNS)]
+
+    words = mock["scene"].split(" ")
     for i, word in enumerate(words):
         token = word if i == len(words) - 1 else word + " "
         yield sse_event("scene_token", {"t": token})
         time.sleep(0.03)  # realistic pacing for animation work; patched in tests
-    yield sse_event("turn_complete", MOCK_TURN)
+    yield sse_event(
+        "turn_complete",
+        {
+            "summary": f"{mock['summary_base']} (mock turn {turn_number + 1})",
+            "scenarios": mock["scenarios"],
+        },
+    )
 
 
 def parse_model_json(raw_text: str) -> dict:
@@ -538,7 +597,7 @@ def continue_story_stream(req: ContinueRequest, mock: bool = False):
                 status_code=403,
                 detail="Mock mode is disabled. Set DEV_MOCK_ENABLED=1 in .env for development.",
             )
-        return StreamingResponse(_stream_mock(), media_type="text/event-stream")
+        return StreamingResponse(_stream_mock(req.summary), media_type="text/event-stream")
 
     return StreamingResponse(_stream_turn(req, template), media_type="text/event-stream")
 

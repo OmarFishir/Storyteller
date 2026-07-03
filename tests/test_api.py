@@ -488,11 +488,52 @@ def test_mock_stream_streams_canned_scene(monkeypatch):
     events = parse_sse(resp.text)
     assert events[0]["event"] == "scene_token"
     assert events[-1]["event"] == "turn_complete"
-    # Reassembling every token yields exactly the canned scene.
+    # Reassembling every token yields exactly the first canned scene.
     scene = "".join(e["data"]["t"] for e in events if e["event"] == "scene_token")
-    assert scene == main.MOCK_SCENE
-    assert events[-1]["data"]["summary"] == main.MOCK_TURN["summary"]
+    assert scene == main.MOCK_TURNS[0]["scene"]
+    # The returned summary carries the turn marker that drives progression.
+    assert "(mock turn 1)" in events[-1]["data"]["summary"]
     assert len(events[-1]["data"]["scenarios"]) == 3
+
+
+def test_mock_stream_advances_through_scenes(monkeypatch):
+    """Playing the mock loop must tell a PROGRESSING story, not repeat one scene.
+
+    The mock is stateless like the real engine: its turn_complete summary
+    carries a '(mock turn N)' marker, and the next request's summary tells it
+    which scene comes next. Live-play bug: the original single-scene mock made
+    every turn identical, which looked exactly like a duplication bug.
+    """
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+
+    # Turn 1: fresh premise, no marker.
+    first = parse_sse(client.post("/continue/stream?mock=true", json=CONTINUE_BODY).text)
+    first_scene = "".join(e["data"]["t"] for e in first if e["event"] == "scene_token")
+    first_summary = first[-1]["data"]["summary"]
+
+    # Turn 2: client passes the returned summary back, exactly like the real loop.
+    body2 = dict(CONTINUE_BODY, summary=first_summary)
+    second = parse_sse(client.post("/continue/stream?mock=true", json=body2).text)
+    second_scene = "".join(e["data"]["t"] for e in second if e["event"] == "scene_token")
+
+    assert first_scene == main.MOCK_TURNS[0]["scene"]
+    assert second_scene == main.MOCK_TURNS[1]["scene"]
+    assert second_scene != first_scene
+    assert "(mock turn 2)" in second[-1]["data"]["summary"]
+    # Options differ per scene too — tapping shouldn't feel like Groundhog Day.
+    assert second[-1]["data"]["scenarios"] != first[-1]["data"]["scenarios"]
+
+
+def test_mock_stream_cycles_past_the_last_scene(monkeypatch):
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+
+    n = len(main.MOCK_TURNS)
+    body = dict(CONTINUE_BODY, summary=f"whatever came before (mock turn {n})")
+    events = parse_sse(client.post("/continue/stream?mock=true", json=body).text)
+    scene = "".join(e["data"]["t"] for e in events if e["event"] == "scene_token")
+    assert scene == main.MOCK_TURNS[0]["scene"]  # wraps around, never crashes
 
 
 def test_mock_stream_unknown_template_404(monkeypatch):
