@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { streamTurn, StoryLength, TurnRequest } from "../lib/api";
 import { StreamingText } from "../components/StreamingText";
+import { PushToTalk } from "../components/PushToTalk";
+import { matchCard } from "../lib/matchCard";
+
+type ConfirmPending = { utterance: string; matchedIndex: number | null };
 
 type StreamError = { status: number; detail: string };
 
@@ -41,10 +45,14 @@ export default function Story() {
   const [error, setError] = useState<StreamError | null>(null);
   const [turnCount, setTurnCount] = useState(0);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [confirmPending, setConfirmPending] = useState<ConfirmPending | null>(
+    null
+  );
   const scrollRef = useRef<ScrollView>(null);
   const startedRef = useRef(false);
   const streamingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function runTurn(req: TurnRequest) {
     // Guard against overlapping turns
@@ -86,6 +94,7 @@ export default function Story() {
   useEffect(() => {
     return () => {
       abortRef.current?.abort(); // stop billing a screen nobody is watching
+      if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
     };
   }, []);
 
@@ -116,50 +125,122 @@ export default function Story() {
     if (pendingTurn) runTurn(pendingTurn);
   };
 
+  // Push-to-talk: a spoken utterance either picks a card (matchCard finds an
+  // ordinal/overlap match) or steers the story free-form (no match). Either
+  // way it fires through handleChoose — the SAME path option-card taps use —
+  // after a 1.5s confirm window the speaker can cancel.
+  const handleUtterance = (utterance: string) => {
+    const matchedIndex = matchCard(utterance, options);
+    setConfirmPending({ utterance, matchedIndex });
+    confirmTimeoutRef.current = setTimeout(() => {
+      confirmTimeoutRef.current = null;
+      setConfirmPending(null);
+      handleChoose(matchedIndex !== null ? options[matchedIndex] : utterance);
+    }, 1500);
+  };
+
+  const cancelConfirm = () => {
+    if (confirmTimeoutRef.current) {
+      clearTimeout(confirmTimeoutRef.current);
+      confirmTimeoutRef.current = null;
+    }
+    setConfirmPending(null);
+  };
+
   return (
-    <ScrollView
-      ref={scrollRef}
-      style={styles.screen}
-      contentContainerStyle={styles.content}
-      onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-    >
-      {scenes.map((scene, idx) => (
-        <Text key={idx} style={styles.sceneText}>
-          {scene}
-        </Text>
-      ))}
+    <View style={styles.root}>
+      <View style={styles.header}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
+          <Text style={styles.backButtonText}>← Home</Text>
+        </Pressable>
+      </View>
 
-      {!error && <StreamingText key={turnCount} text={currentScene} />}
+      <ScrollView
+        ref={scrollRef}
+        style={styles.screen}
+        contentContainerStyle={styles.content}
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+      >
+        {scenes.map((scene, idx) => (
+          <Text key={idx} style={styles.sceneText}>
+            {scene}
+          </Text>
+        ))}
 
-      {error && (
-        <View style={styles.errorBox}>
-          {currentScene.length > 0 && (
-            <Text style={styles.sceneText}>{currentScene}</Text>
-          )}
-          <Pressable onPress={handleRetry} style={styles.retry}>
-            <Text style={styles.retryText}>{errorMessage(error)}</Text>
-          </Pressable>
-        </View>
-      )}
+        {!error && <StreamingText key={turnCount} text={currentScene} />}
 
-      {!error && options.length > 0 && (
-        <View style={styles.optionsSection}>
-          {options.map((option) => (
-            <Pressable
-              key={option}
-              onPress={() => handleChoose(option)}
-              style={styles.card}
-            >
-              <Text style={styles.cardTitle}>{option}</Text>
+        {error && (
+          <View style={styles.errorBox}>
+            {currentScene.length > 0 && (
+              <Text style={styles.sceneText}>{currentScene}</Text>
+            )}
+            <Pressable onPress={handleRetry} style={styles.retry}>
+              <Text style={styles.retryText}>{errorMessage(error)}</Text>
             </Pressable>
-          ))}
-        </View>
-      )}
-    </ScrollView>
+          </View>
+        )}
+
+        {!error && options.length > 0 && (
+          <View style={styles.optionsSection}>
+            {options.map((option, idx) => (
+              <Pressable
+                key={option}
+                onPress={() => handleChoose(option)}
+                style={[
+                  styles.card,
+                  confirmPending?.matchedIndex === idx && styles.cardHighlighted,
+                ]}
+              >
+                <Text style={styles.cardTitle}>{option}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </ScrollView>
+
+      <View style={styles.pttArea}>
+        {confirmPending && (
+          <View style={styles.confirmBar}>
+            <Text style={styles.confirmText}>
+              Heard: "{confirmPending.utterance}" →{" "}
+              {confirmPending.matchedIndex !== null
+                ? `choosing option ${confirmPending.matchedIndex + 1}`
+                : "steering the story"}
+            </Text>
+            <Pressable onPress={cancelConfirm} style={styles.cancelButton}>
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
+        )}
+        <PushToTalk
+          disabled={isStreaming || confirmPending !== null}
+          onUtterance={handleUtterance}
+        />
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: "#121212",
+  },
+  header: {
+    flexDirection: "row",
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  backButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  backButtonText: {
+    color: "#7aa2f7",
+    fontSize: 15,
+    fontWeight: "bold",
+  },
   screen: {
     flex: 1,
     backgroundColor: "#121212",
@@ -199,9 +280,51 @@ const styles = StyleSheet.create({
     borderColor: "#2e2e2e",
     marginBottom: 12,
   },
+  cardHighlighted: {
+    borderColor: "#7aa2f7",
+    backgroundColor: "#1a2333",
+  },
   cardTitle: {
     fontSize: 16,
     fontWeight: "bold",
     color: "#f2f2f2",
+  },
+  pttArea: {
+    borderTopWidth: 1,
+    borderTopColor: "#2e2e2e",
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 16,
+    backgroundColor: "#121212",
+  },
+  confirmBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: "#1e1e1e",
+    borderWidth: 1,
+    borderColor: "#3a3f4f",
+    marginBottom: 8,
+    gap: 12,
+  },
+  confirmText: {
+    flex: 1,
+    color: "#f2f2f2",
+    fontSize: 14,
+  },
+  cancelButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: "#2a1414",
+    borderWidth: 1,
+    borderColor: "#5a2a2a",
+  },
+  cancelButtonText: {
+    color: "#e08080",
+    fontSize: 13,
+    fontWeight: "bold",
   },
 });

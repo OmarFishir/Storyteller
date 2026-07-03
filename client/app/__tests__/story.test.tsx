@@ -1,4 +1,4 @@
-import { render, fireEvent, waitFor } from "@testing-library/react-native";
+import { render, fireEvent, waitFor, act } from "@testing-library/react-native";
 import Story, { resolveStoryLength } from "../story";
 import * as api from "../../lib/api";
 import type { StreamEvent } from "../../lib/sse";
@@ -12,9 +12,37 @@ jest.mock("expo-router", () => ({
   router: { back: jest.fn() },
 }));
 
+// --- voice fake: capture callbacks so tests can drive recognition ---
+// (named with a "mock" prefix so Jest's babel hoisting allows referencing it
+// from inside the jest.mock factory below — bare "voiceFake" throws
+// "Invalid variable access" under out-of-scope-variable hoisting rules.)
+const mockVoiceFake = {
+  available: true,
+  start: jest.fn(),
+  stop: jest.fn(),
+  abort: jest.fn(),
+};
+jest.mock("../../lib/voice", () => ({
+  getVoiceIn: () => mockVoiceFake,
+}));
+
 async function* fixtureStream(events: StreamEvent[]) {
   for (const ev of events) yield ev;
 }
+
+const happyTurn = () =>
+  fixtureStream([
+    { type: "token", t: "Scene. " },
+    {
+      type: "turn_complete",
+      summary: "s",
+      scenarios: [
+        "Force the iron door open now",
+        "Ask the voice its name",
+        "Run from the footsteps",
+      ],
+    },
+  ]);
 
 describe("Story", () => {
   it("streams the opening scene and then shows option cards", async () => {
@@ -214,6 +242,132 @@ describe("Story", () => {
     unmount();
     expect(capturedSignal?.aborted).toBe(true);
     release!();
+  });
+});
+
+describe("push-to-talk", () => {
+  beforeEach(() => {
+    mockVoiceFake.start.mockClear();
+    mockVoiceFake.stop.mockClear();
+  });
+
+  it("spoken ordinal picks a card after the confirm window", async () => {
+    jest.useFakeTimers();
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(happyTurn());
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    act(() => cb.onInterim("the second"));
+    expect(getByText(/the second/)).toBeTruthy(); // live transcript visible
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("the second one"));
+
+    expect(getByText(/choosing option 2/i)).toBeTruthy();
+    act(() => jest.advanceTimersByTime(1600));
+    await waitFor(() =>
+      expect(spy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ chosen_scenario: "Ask the voice its name" }),
+        expect.anything()
+      )
+    );
+    jest.useRealTimers();
+  });
+
+  it("unmatched speech steers the story free-form", async () => {
+    jest.useFakeTimers();
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(happyTurn());
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("she sets fire to the archive and flees north"));
+
+    expect(getByText(/steering the story/i)).toBeTruthy();
+    act(() => jest.advanceTimersByTime(1600));
+    await waitFor(() =>
+      expect(spy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          chosen_scenario: "she sets fire to the archive and flees north",
+        }),
+        expect.anything()
+      )
+    );
+    jest.useRealTimers();
+  });
+
+  it("cancel inside the confirm window discards the utterance", async () => {
+    jest.useFakeTimers();
+    const spy = jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("the second one"));
+    fireEvent.press(getByText(/cancel/i));
+    act(() => jest.advanceTimersByTime(2000));
+    expect(spy).toHaveBeenCalledTimes(1); // only the opening turn
+    jest.useRealTimers();
+  });
+
+  it("PTT is disabled while a turn is streaming", async () => {
+    let release: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    jest.spyOn(api, "streamTurn").mockReturnValue(
+      (async function* () {
+        yield { type: "token", t: "Slow " } as const;
+        await gate;
+        yield {
+          type: "turn_complete",
+          summary: "s",
+          scenarios: ["A"],
+        } as const;
+      })() as never
+    );
+
+    const { getByTestId, getByText } = render(<Story />);
+    await waitFor(() => getByText(/Slow/));
+    expect(
+      getByTestId("ptt-button").props.accessibilityState?.disabled
+    ).toBe(true);
+    // Flush the generator's remaining state updates under act() so releasing
+    // the gate doesn't produce an "update not wrapped in act" warning — the
+    // test only cares about the disabled assertion above, not this cleanup.
+    await act(async () => {
+      release!();
+    });
+  });
+
+  it("mic permission error shows inline", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    act(() => cb.onError("Microphone permission denied. Enable the mic to speak your story."));
+    expect(getByText(/microphone permission denied/i)).toBeTruthy();
+  });
+
+  it("back control exists", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+    expect(getByText(/home/i)).toBeTruthy();
   });
 });
 

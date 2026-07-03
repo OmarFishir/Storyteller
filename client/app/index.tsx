@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { router } from "expo-router";
 import { getTemplates, StoryLength, Template } from "../lib/api";
+import { PushToTalk } from "../components/PushToTalk";
 
 type LoadState = "loading" | "error" | "ready";
 
@@ -85,14 +86,21 @@ export default function Home() {
       {selected && (
         <View style={styles.premiseSection}>
           <Text style={styles.sectionLabel}>Your premise</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Your story premise..."
-            placeholderTextColor="#888"
-            multiline
-            value={premise}
-            onChangeText={setPremise}
-          />
+          <View style={styles.inputRow}>
+            <TextInput
+              style={[styles.input, styles.inputWithMic]}
+              placeholder="Your story premise..."
+              placeholderTextColor="#888"
+              multiline
+              value={premise}
+              onChangeText={setPremise}
+            />
+            <PushToTalk
+              testID="premise-mic"
+              compact
+              onUtterance={setPremise}
+            />
+          </View>
           <View style={styles.chipRow}>
             {selected.premise_seeds.map((seed) => (
               <Pressable
@@ -209,6 +217,11 @@ const styles = StyleSheet.create({
     color: "#f2f2f2",
     marginBottom: 8,
   },
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
   input: {
     minHeight: 90,
     borderRadius: 8,
@@ -219,6 +232,9 @@ const styles = StyleSheet.create({
     padding: 12,
     fontSize: 15,
     textAlignVertical: "top",
+  },
+  inputWithMic: {
+    flex: 1,
   },
   chipRow: {
     flexDirection: "row",

@@ -1,9 +1,22 @@
-import { render, fireEvent, waitFor } from "@testing-library/react-native";
+import { render, fireEvent, waitFor, act } from "@testing-library/react-native";
 import Home from "../index";
 import * as api from "../../lib/api";
 
 jest.mock("expo-router", () => ({
   router: { push: jest.fn() },
+}));
+
+// --- voice fake: capture callbacks so tests can drive recognition ---
+// (named with a "mock" prefix — see story.test.tsx for why bare "voiceFake"
+// fails Jest's babel hoisting check inside the jest.mock factory below.)
+const mockVoiceFake = {
+  available: true,
+  start: jest.fn(),
+  stop: jest.fn(),
+  abort: jest.fn(),
+};
+jest.mock("../../lib/voice", () => ({
+  getVoiceIn: () => mockVoiceFake,
 }));
 
 const TEMPLATES = [
@@ -47,5 +60,21 @@ describe("Home", () => {
       pathname: "/story",
       params: { templateId: "fantasy", premise: "a premise", length: "long" },
     });
+  });
+
+  it("mic fills the premise input with the spoken transcript", async () => {
+    jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
+    const { getByText, getByTestId, getByPlaceholderText } = render(<Home />);
+    await waitFor(() => getByText("Fantasy Adventure"));
+    fireEvent.press(getByText("Fantasy Adventure"));
+
+    fireEvent(getByTestId("premise-mic"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("premise-mic"), "pressOut");
+    act(() => cb.onFinal("a dragon egg hatches in a city without magic"));
+
+    expect(getByPlaceholderText(/premise/i).props.value).toBe(
+      "a dragon egg hatches in a city without magic"
+    );
   });
 });
