@@ -7,5 +7,18 @@
     "A cargo hauler's navigation AI starts refusing routes it insists are 'already taken by us'.",
     "The first colony ship arrives to find the planet already terraformed and one house standing.",
     "A memory-backup technician finds a recording of their own death, timestamped next week."
-  ]
+  ],
+  "structure": {
+    "source": "https://reedsy.com/blog/guide/story-structure/dan-harmon-story-circle/",
+    "beats": [
+      {"name": "You", "guidance": "A character in their zone of comfort; the familiar order of their world."},
+      {"name": "Need", "guidance": "They want or lack something; discontent surfaces."},
+      {"name": "Go", "guidance": "They cross into an unfamiliar situation."},
+      {"name": "Search", "guidance": "They adapt, struggle, and pay tolls in the unfamiliar world."},
+      {"name": "Find", "guidance": "They find what they came for — though not in the form expected."},
+      {"name": "Take", "guidance": "It costs more than expected; a heavy price is paid."},
+      {"name": "Return", "guidance": "They head back toward the familiar world, changed by what they carry."},
+      {"name": "Change", "guidance": "The new order integrates the lesson; the character and world are transformed."}
+    ]
+  }
 }

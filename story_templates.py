@@ -37,6 +37,31 @@ def load_templates(directory: str = TEMPLATES_DIR) -> dict[str, dict]:
             raise RuntimeError(
                 f"Template {filename}: premise_seeds must be a non-empty list of strings"
             )
+        structure = data.get("structure")
+        if structure is not None:
+            if not isinstance(structure, dict) or not isinstance(
+                structure.get("source"), str
+            ) or not structure.get("source"):
+                raise RuntimeError(
+                    f"Template {filename}: structure needs a non-empty string 'source'"
+                )
+            beats = structure.get("beats")
+            if not isinstance(beats, list) or not beats:
+                raise RuntimeError(
+                    f"Template {filename}: structure needs a non-empty 'beats' list"
+                )
+            for beat in beats:
+                if (
+                    not isinstance(beat, dict)
+                    or not isinstance(beat.get("name"), str)
+                    or not beat["name"]
+                    or not isinstance(beat.get("guidance"), str)
+                    or not beat["guidance"]
+                ):
+                    raise RuntimeError(
+                        f"Template {filename}: every structure beat needs non-empty "
+                        "string 'name' and 'guidance'"
+                    )
         if data["id"] in templates:
             raise RuntimeError(f"Duplicate template id: {data['id']}")
         templates[data["id"]] = data

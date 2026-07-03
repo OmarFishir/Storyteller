@@ -7,5 +7,22 @@
     "An apprentice mapmaker discovers the kingdom's maps are deliberately wrong about one forest.",
     "A young shepherd finds a fallen star that whispers the names of people about to make terrible choices.",
     "The last dragon egg hatches in a city where magic was outlawed a century ago."
-  ]
+  ],
+  "structure": {
+    "source": "https://en.wikipedia.org/wiki/The_Writer%27s_Journey:_Mythic_Structure_for_Writers",
+    "beats": [
+      {"name": "Ordinary World", "guidance": "Show the hero's normal life — and what is quietly missing from it."},
+      {"name": "Call to Adventure", "guidance": "A challenge, discovery, or invitation disrupts the ordinary world."},
+      {"name": "Refusal of the Call", "guidance": "Fear, duty, or doubt holds the hero back from answering."},
+      {"name": "Meeting the Mentor", "guidance": "A guide provides wisdom, tools, or the push the hero needs."},
+      {"name": "Crossing the Threshold", "guidance": "The hero commits and steps into the unfamiliar world; there is no easy way back."},
+      {"name": "Tests, Allies, Enemies", "guidance": "Trials reveal the new world's rules; friendships and rivalries form."},
+      {"name": "Approach to the Inmost Cave", "guidance": "Preparation and gathering dread on the way to the central danger."},
+      {"name": "The Ordeal", "guidance": "The hero faces their greatest fear or deadliest foe — a symbolic death and rebirth."},
+      {"name": "Reward", "guidance": "The hero seizes the prize: the treasure, the secret, the reconciliation."},
+      {"name": "The Road Back", "guidance": "Consequences give chase as the hero turns toward home."},
+      {"name": "Resurrection", "guidance": "One final, ultimate test — the hero must prove the transformation is real."},
+      {"name": "Return with the Elixir", "guidance": "Home again, changed, bearing something that heals the ordinary world."}
+    ]
+  }
 }

@@ -7,5 +7,18 @@
     "A small hedgehog inherits a lighthouse that only lights up when someone nearby needs a friend.",
     "The moon loses one of her silver buttons in the deep forest, and the night animals organize a search.",
     "A teapot in the village bakery starts brewing tea that tastes like your happiest memory."
-  ]
+  ],
+  "structure": {
+    "source": "https://www.npr.org/2026/06/23/nx-s1-5750619/meet-the-creator-of-the-story-spine-an-8-sentence-tool-to-create-and-analyze-stories",
+    "beats": [
+      {"name": "Once Upon a Time", "guidance": "Warmly establish the world and its hero, simply and cozily."},
+      {"name": "Every Day", "guidance": "Show the comforting routine of that world."},
+      {"name": "But One Day", "guidance": "Something gentle-but-surprising breaks the routine."},
+      {"name": "Because of That (first)", "guidance": "The first consequence pulls the hero into action."},
+      {"name": "Because of That (second)", "guidance": "Consequences compound; the stakes grow, but stay bedtime-gentle."},
+      {"name": "Because of That (third)", "guidance": "The chain of consequences reaches its turning point."},
+      {"name": "Until Finally", "guidance": "The climactic moment resolves the trouble with warmth and courage."},
+      {"name": "Ever Since Then", "guidance": "The new, better routine and its gentle lesson — end calm and reassuring."}
+    ]
+  }
 }

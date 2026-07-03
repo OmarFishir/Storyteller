@@ -7,5 +7,22 @@
     "A private eye takes one last case: find who is sending the mayor photographs of a crime that officially never happened.",
     "The city's best forger is found dead holding a painting everyone insists was never painted.",
     "A detective's estranged partner reappears with amnesia and a briefcase neither of them can open."
-  ]
+  ],
+  "structure": {
+    "source": "https://storytellingdb.com/12-step-mystery-formula/",
+    "beats": [
+      {"name": "Disclose the Mystery", "guidance": "Introduce the central puzzle or crime that drives the story; hook with the mystery itself."},
+      {"name": "Set the Sleuth on the Path", "guidance": "Establish the investigator and why this case is naturally, personally theirs."},
+      {"name": "Introduce the Subplot", "guidance": "Open a secondary thread — a relationship or personal stake — that deepens character alongside the case."},
+      {"name": "Facts About Suspects", "guidance": "Introduce the suspects, their ties to the victim, and their possible motives."},
+      {"name": "Broaden the Investigation", "guidance": "Expand beyond first interviews: new locations, records, physical evidence."},
+      {"name": "Sleuth's Background", "guidance": "Reveal the investigator's relevant history — why they work the way they do, and what this case costs them."},
+      {"name": "Reveal Hidden Motives", "guidance": "Concealed connections and motives surface; initial assumptions start to crack."},
+      {"name": "Reveal Results", "guidance": "The sleuth lands on a preliminary theory — plausible, confident, and subtly wrong."},
+      {"name": "Review the Case", "guidance": "New evidence breaks the false solution; the investigation pivots."},
+      {"name": "Weigh the Evidence", "guidance": "With fresh insight, weigh everything and assemble the true final theory."},
+      {"name": "Subplot Resolution", "guidance": "Close the secondary thread before the main reveal."},
+      {"name": "Climax", "guidance": "The dramatic confrontation reveals the full solution — how, who, and why."}
+    ]
+  }
 }

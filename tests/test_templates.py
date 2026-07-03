@@ -46,3 +46,48 @@ def test_rejects_empty_dir(tmp_path):
 def test_real_templates_dir_loads_all_four():
     templates = story_templates.load_templates()
     assert {"fantasy", "noir", "scifi", "fairytale"} <= set(templates)
+
+
+def test_structure_is_optional(tmp_path):
+    _write(tmp_path, "test.json", VALID)  # VALID has no structure key
+    templates = story_templates.load_templates(str(tmp_path))
+    assert "structure" not in templates["test"]
+
+
+def test_valid_structure_loads(tmp_path):
+    good = dict(VALID)
+    good["structure"] = {
+        "source": "https://example.test",
+        "beats": [{"name": "One", "guidance": "g"}],
+    }
+    _write(tmp_path, "test.json", good)
+    templates = story_templates.load_templates(str(tmp_path))
+    assert templates["test"]["structure"]["beats"][0]["name"] == "One"
+
+
+@pytest.mark.parametrize(
+    "structure",
+    [
+        {"beats": [{"name": "One", "guidance": "g"}]},          # missing source
+        {"source": "https://x", "beats": []},                    # empty beats
+        {"source": "https://x", "beats": [{"name": "One"}]},     # beat missing guidance
+        {"source": "https://x", "beats": [{"name": "", "guidance": "g"}]},  # empty name
+        {"source": "https://x"},                                 # missing beats
+    ],
+)
+def test_bad_structure_fails_loud(tmp_path, structure):
+    bad = dict(VALID)
+    bad["structure"] = structure
+    _write(tmp_path, "bad.json", bad)
+    with pytest.raises(RuntimeError, match="structure"):
+        story_templates.load_templates(str(tmp_path))
+
+
+def test_all_shipped_templates_have_sourced_structures():
+    templates = story_templates.load_templates()
+    for tid in ("fantasy", "noir", "scifi", "fairytale"):
+        structure = templates[tid]["structure"]
+        assert structure["source"].startswith("http")
+        assert len(structure["beats"]) >= 8
+        for beat in structure["beats"]:
+            assert beat["name"] and beat["guidance"]
