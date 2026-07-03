@@ -8,15 +8,23 @@ import {
   View,
 } from "react-native";
 import { router } from "expo-router";
-import { getTemplates, Template } from "../lib/api";
+import { getTemplates, StoryLength, Template } from "../lib/api";
 
 type LoadState = "loading" | "error" | "ready";
+
+const LENGTH_OPTIONS: StoryLength[] = ["short", "medium", "long"];
+const LENGTH_LABELS: Record<StoryLength, string> = {
+  short: "Short",
+  medium: "Medium",
+  long: "Long",
+};
 
 export default function Home() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [selected, setSelected] = useState<Template | null>(null);
   const [premise, setPremise] = useState("");
+  const [length, setLength] = useState<StoryLength>("short");
 
   const loadTemplates = useCallback(() => {
     setLoadState("loading");
@@ -38,7 +46,7 @@ export default function Home() {
     if (!selected || !canBegin) return;
     router.push({
       pathname: "/story",
-      params: { templateId: selected.id, premise },
+      params: { templateId: selected.id, premise, length },
     });
   };
 
@@ -95,6 +103,31 @@ export default function Home() {
                 <Text style={styles.chipText}>{seed}</Text>
               </Pressable>
             ))}
+          </View>
+
+          <Text style={[styles.sectionLabel, styles.lengthLabel]}>
+            Story length
+          </Text>
+          <View style={styles.chipRow}>
+            {LENGTH_OPTIONS.map((option) => {
+              const isSelected = length === option;
+              return (
+                <Pressable
+                  key={option}
+                  onPress={() => setLength(option)}
+                  style={[styles.lengthChip, isSelected && styles.lengthChipSelected]}
+                >
+                  <Text
+                    style={[
+                      styles.lengthChipText,
+                      isSelected && styles.lengthChipTextSelected,
+                    ]}
+                  >
+                    {LENGTH_LABELS[option]}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
 
           <Pressable
@@ -204,6 +237,29 @@ const styles = StyleSheet.create({
   chipText: {
     color: "#c8ccd8",
     fontSize: 13,
+  },
+  lengthLabel: {
+    marginTop: 16,
+  },
+  lengthChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: "#232733",
+    borderWidth: 1,
+    borderColor: "#3a3f4f",
+  },
+  lengthChipSelected: {
+    borderColor: "#7aa2f7",
+    backgroundColor: "#1a2333",
+  },
+  lengthChipText: {
+    color: "#c8ccd8",
+    fontSize: 13,
+  },
+  lengthChipTextSelected: {
+    color: "#f2f2f2",
+    fontWeight: "bold",
   },
   beginButton: {
     marginTop: 20,

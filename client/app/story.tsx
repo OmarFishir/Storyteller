@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
-import { streamTurn, TurnRequest } from "../lib/api";
+import { streamTurn, StoryLength, TurnRequest } from "../lib/api";
 import { StreamingText } from "../components/StreamingText";
 
 type StreamError = { status: number; detail: string };
@@ -14,10 +14,12 @@ function errorMessage(error: StreamError): string {
 }
 
 export default function Story() {
-  const { templateId, premise } = useLocalSearchParams<{
+  const { templateId, premise, length } = useLocalSearchParams<{
     templateId: string;
     premise: string;
+    length: StoryLength;
   }>();
+  const storyLength: StoryLength = length ?? "short";
 
   const [scenes, setScenes] = useState<string[]>([]);
   const [currentScene, setCurrentScene] = useState("");
@@ -69,6 +71,8 @@ export default function Story() {
       template_id: templateId,
       summary: premise,
       chosen_scenario: "Open the story.",
+      turn: scenes.length + 1,
+      length: storyLength,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -78,6 +82,8 @@ export default function Story() {
       template_id: templateId,
       summary,
       chosen_scenario: scenario,
+      turn: scenes.length + 1,
+      length: storyLength,
     });
   };
 

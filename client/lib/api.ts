@@ -7,10 +7,13 @@ export type Template = {
   description: string;
   premise_seeds: string[];
 };
+export type StoryLength = "short" | "medium" | "long";
 export type TurnRequest = {
   template_id: string;
   summary: string;
   chosen_scenario: string;
+  turn: number;
+  length: StoryLength;
 };
 
 export const API_URL =

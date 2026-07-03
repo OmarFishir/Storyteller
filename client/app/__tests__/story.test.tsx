@@ -4,7 +4,11 @@ import * as api from "../../lib/api";
 import type { StreamEvent } from "../../lib/sse";
 
 jest.mock("expo-router", () => ({
-  useLocalSearchParams: () => ({ templateId: "fantasy", premise: "A dragon egg hatches." }),
+  useLocalSearchParams: () => ({
+    templateId: "fantasy",
+    premise: "A dragon egg hatches.",
+    length: "short",
+  }),
   router: { back: jest.fn() },
 }));
 
@@ -30,6 +34,8 @@ describe("Story", () => {
       template_id: "fantasy",
       summary: "A dragon egg hatches.",
       chosen_scenario: "Open the story.",
+      turn: 1,
+      length: "short",
     });
   });
 
@@ -57,6 +63,8 @@ describe("Story", () => {
       template_id: "fantasy",
       summary: "sum-1",
       chosen_scenario: "Option A",
+      turn: 2,
+      length: "short",
     });
     // scene one is still on screen (finished scenes persist)
     expect(getByText(/Scene one/)).toBeTruthy();
@@ -156,5 +164,25 @@ describe("Story", () => {
     // With streaming guard fix: only 2 calls (mount + first tap; second tap ignored)
     // This test confirms the guard prevents overlapping streams
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("retry does not advance the turn number", async () => {
+    const spy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(
+        fixtureStream([{ type: "stream_error", status: 503, detail: "busy" }])
+      )
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Fresh." },
+          { type: "turn_complete", summary: "s", scenarios: ["A"] },
+        ])
+      );
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText(/tap to retry/i));
+    fireEvent.press(getByText(/tap to retry/i));
+    await waitFor(() => getByText(/Fresh/));
+    expect(spy.mock.calls[0][0].turn).toBe(1);
+    expect(spy.mock.calls[1][0].turn).toBe(1); // retry re-sends the SAME turn
   });
 });

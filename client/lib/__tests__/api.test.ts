@@ -14,7 +14,7 @@ function streamResponseFromString(body: string, status = 200): Response {
 }
 
 describe("streamTurn", () => {
-  const REQ = { template_id: "fantasy", summary: "s", chosen_scenario: "c" };
+  const REQ = { template_id: "fantasy", summary: "s", chosen_scenario: "c", turn: 1, length: "short" as const };
 
   it("yields parsed events from the SSE body", async () => {
     const body =
