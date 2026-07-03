@@ -617,6 +617,26 @@ def test_stream_unexpected_error_sanitized_and_logged(monkeypatch, capsys):
     assert "unexpected streaming error" in captured.err
 
 
+def test_stream_scene_budget_scales_with_length(monkeypatch):
+    captured = {}
+
+    def fake_stream(contents, **kwargs):
+        captured["max_tokens"] = kwargs.get("max_tokens")
+        captured["label"] = kwargs.get("label")
+        yield "scene text"
+
+    monkeypatch.setattr(main, "call_gemini_stream", fake_stream)
+    monkeypatch.setattr(
+        main,
+        "call_gemini",
+        lambda contents, **kw: '{"summary": "s", "scenarios": ["a", "b", "c"]}',
+    )
+
+    resp = client.post("/continue/stream", json=dict(CONTINUE_BODY, length="long"))
+    assert resp.status_code == 200
+    assert captured == {"max_tokens": 1000, "label": "scene"}
+
+
 def test_continue_502_when_scenarios_empty(monkeypatch):
     responses = iter(["The scene prose.", '{"summary": "ok", "scenarios": []}'])
     monkeypatch.setattr(
@@ -671,11 +691,26 @@ def test_scene_prompt_epilogue_past_the_arc():
 
 
 def test_fold_prompt_steers_toward_next_beat_and_scales_summary():
+    # Options generated at turn t are consumed at turn t+1 — steer toward
+    # THAT turn's current beat, not the structurally-next beat. Long noir,
+    # turn 1 -> turn 2 -> index (2-1)//3 = 0 -> still beat 1.
     req = main.ContinueRequest(**CONTINUE_BODY, turn=1, length="long")
     prompt = main.build_fold_prompt(req, "the scene text")
-    assert "Set the Sleuth on the Path" in prompt   # next beat, not current
-    assert "250" in prompt                           # long summary word budget
+    assert "Disclose the Mystery" in prompt   # next turn's CURRENT beat
+    assert "250" in prompt                    # long summary word budget
     assert "3-4 sentences" in main.FOLD_PROMPT
+
+    # last turn inside a beat steers toward the NEXT beat (turn 4, long -> index 1)
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=3, length="long")
+    assert "Set the Sleuth on the Path" in main.build_fold_prompt(req, "scene")
+
+    # short (1 turn/beat): behavior unchanged -- turn 1 steers to beat 2
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=1, length="short")
+    assert "Set the Sleuth on the Path" in main.build_fold_prompt(req, "scene")
+
+    # final turn of the arc steers into the epilogue
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=12, length="short")
+    assert "Epilogue" in main.build_fold_prompt(req, "scene")
 
 
 def test_scene_budget_scales_with_length(monkeypatch):

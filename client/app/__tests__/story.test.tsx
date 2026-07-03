@@ -1,5 +1,5 @@
 import { render, fireEvent, waitFor } from "@testing-library/react-native";
-import Story from "../story";
+import Story, { resolveStoryLength } from "../story";
 import * as api from "../../lib/api";
 import type { StreamEvent } from "../../lib/sse";
 
@@ -184,5 +184,27 @@ describe("Story", () => {
     await waitFor(() => getByText(/Fresh/));
     expect(spy.mock.calls[0][0].turn).toBe(1);
     expect(spy.mock.calls[1][0].turn).toBe(1); // retry re-sends the SAME turn
+  });
+});
+
+describe("resolveStoryLength", () => {
+  // The route param is URL-editable on web and can arrive as an array if the
+  // query string duplicates the key — this must always fall back to "short"
+  // rather than pass an unchecked cast through to the backend.
+  it("passes through a valid length", () => {
+    expect(resolveStoryLength("medium")).toBe("medium");
+    expect(resolveStoryLength("long")).toBe("long");
+  });
+
+  it("falls back to short for an invalid string", () => {
+    expect(resolveStoryLength("epic")).toBe("short");
+  });
+
+  it("falls back to short for an array (duplicated query param)", () => {
+    expect(resolveStoryLength(["long", "medium"])).toBe("short");
+  });
+
+  it("falls back to short when missing", () => {
+    expect(resolveStoryLength(undefined)).toBe("short");
   });
 });

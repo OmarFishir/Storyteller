@@ -13,13 +13,25 @@ function errorMessage(error: StreamError): string {
   return "Something went wrong — tap to retry.";
 }
 
+const LENGTHS = ["short", "medium", "long"] as const;
+
+// The route param is an unchecked cast from useLocalSearchParams — it's
+// URL-editable on web and can arrive as an array if the query string
+// duplicates the key. Total fallback to "short" for anything that isn't
+// exactly one of the three known lengths.
+export function resolveStoryLength(raw: unknown): StoryLength {
+  return typeof raw === "string" && (LENGTHS as readonly string[]).includes(raw)
+    ? (raw as StoryLength)
+    : "short";
+}
+
 export default function Story() {
   const { templateId, premise, length } = useLocalSearchParams<{
     templateId: string;
     premise: string;
     length: StoryLength;
   }>();
-  const storyLength: StoryLength = length ?? "short";
+  const storyLength: StoryLength = resolveStoryLength(length);
 
   const [scenes, setScenes] = useState<string[]>([]);
   const [currentScene, setCurrentScene] = useState("");

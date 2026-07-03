@@ -181,15 +181,22 @@ def build_scene_prompt(template: dict, req: ContinueRequest) -> str:
 
 
 def build_fold_prompt(req: ContinueRequest, scene: str) -> str:
-    """Assemble the scribe prompt; the summary word budget scales with length."""
+    """
+    Assemble the scribe prompt; the summary word budget scales with length.
+
+    Options proposed here are generated at turn t but CONSUMED at turn t+1 —
+    so steering must target turn t+1's CURRENT beat, not the structurally-next
+    beat. On short (1 turn/beat) those coincide; on medium/long, turn t+1 is
+    often still inside the same beat the story is already on.
+    """
     template = TEMPLATES.get(req.template_id, {})
-    beats = story_beats.select_beats(template.get("structure"), req.turn, req.length)
+    steer = story_beats.select_beats(template.get("structure"), req.turn + 1, req.length)
     steer_block = ""
-    if beats:
-        _, nxt = beats
+    if steer:
+        target, _ = steer
         steer_block = (
             f"\nSteer the options toward the next story beat: "
-            f"{nxt['name']} — {nxt['guidance']}"
+            f"{target['name']} — {target['guidance']}"
         )
     return (
         f"{FOLD_PROMPT}\n\nWord limit for the summary: "
