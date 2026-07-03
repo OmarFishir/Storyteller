@@ -273,7 +273,7 @@ def test_continue_returns_scene_summary_and_options(monkeypatch):
     assert labels == ["scene", "fold"]  # creative call first, scribe second
     # Pin the token/temperature budget per call: storyteller call is more
     # expensive and more creative; scribe call is cheaper and more mechanical.
-    assert call_params == [(600, 0.9), (400, 0.7)]
+    assert call_params == [(600, 0.9), (800, 0.7)]
 
 
 def test_continue_rejects_unknown_template():
@@ -465,7 +465,7 @@ def parse_sse(body: str) -> list[dict]:
 
 
 CONTINUE_BODY = {
-    "template_id": "fantasy",
+    "template_id": "noir",
     "summary": "A knight seeks a dragon.",
     "chosen_scenario": "She enters the cave.",
 }
@@ -639,3 +639,61 @@ def test_continue_still_validates_after_refactor(monkeypatch):
 
     resp = client.post("/continue", json=CONTINUE_BODY)
     assert resp.status_code == 502  # empty summary still rejected via shared helper
+
+
+def test_continue_request_rejects_bad_turn_and_length():
+    assert client.post("/continue", json=dict(CONTINUE_BODY, turn=0)).status_code == 422
+    assert client.post("/continue", json=dict(CONTINUE_BODY, length="epic")).status_code == 422
+
+
+def test_scene_prompt_carries_current_beat_and_craft():
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=1, length="short")
+    prompt = main.build_scene_prompt(main.TEMPLATES["noir"], req)
+    assert "Disclose the Mystery" in prompt
+    # order: static prompt first, then style, then beat, then dynamic content
+    assert prompt.index(main.STORY_PROMPT[:40]) < prompt.index(
+        main.TEMPLATES["noir"]["style"][:30]
+    ) < prompt.index("Disclose the Mystery") < prompt.index(req.summary)
+    # environmental-craft instruction lives in the STATIC prompt (caching rule)
+    assert "sensory" in main.STORY_PROMPT.lower()
+
+
+def test_scene_prompt_advances_beats_with_turn_and_length():
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=2, length="short")
+    assert "Set the Sleuth on the Path" in main.build_scene_prompt(main.TEMPLATES["noir"], req)
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=2, length="medium")
+    assert "Disclose the Mystery" in main.build_scene_prompt(main.TEMPLATES["noir"], req)
+
+
+def test_scene_prompt_epilogue_past_the_arc():
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=13, length="short")
+    assert "Epilogue" in main.build_scene_prompt(main.TEMPLATES["noir"], req)
+
+
+def test_fold_prompt_steers_toward_next_beat_and_scales_summary():
+    req = main.ContinueRequest(**CONTINUE_BODY, turn=1, length="long")
+    prompt = main.build_fold_prompt(req, "the scene text")
+    assert "Set the Sleuth on the Path" in prompt   # next beat, not current
+    assert "250" in prompt                           # long summary word budget
+    assert "3-4 sentences" in main.FOLD_PROMPT
+
+
+def test_scene_budget_scales_with_length(monkeypatch):
+    captured = []
+
+    def fake_call_gemini(contents, **kwargs):
+        captured.append((kwargs.get("max_tokens"), kwargs.get("label")))
+        if kwargs.get("label") == "fold":
+            return '{"summary": "s", "scenarios": ["a", "b", "c"]}'
+        return "scene"
+
+    monkeypatch.setattr(main, "call_gemini", fake_call_gemini)
+    client.post("/continue", json=dict(CONTINUE_BODY, turn=1, length="long"))
+    assert (1000, "scene") in captured and (800, "fold") in captured
+
+
+def test_mock_scenarios_are_three_to_four_sentences():
+    for turn in main.MOCK_TURNS:
+        for option in turn["scenarios"]:
+            sentences = [s for s in option.replace("!", ".").replace("?", ".").split(".") if s.strip()]
+            assert 3 <= len(sentences) <= 4, option

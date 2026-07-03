@@ -20,17 +20,19 @@ import re
 import sys
 import time
 from collections.abc import Iterator
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
 
 import usage_log
 import story_templates
+import story_beats
 
 # ---------------------------------------------------------------------------
 # 1. Load secrets
@@ -93,6 +95,8 @@ class ContinueRequest(BaseModel):
     template_id: str
     summary: str
     chosen_scenario: str
+    turn: int = Field(1, ge=1)
+    length: Literal["short", "medium", "long"] = "short"
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +111,7 @@ class ContinueRequest(BaseModel):
 # read prose.
 SYSTEM_PROMPT = """You are a creative writing assistant for a story-building app.
 Given a story premise, propose exactly 3 distinct next-scenario options.
-Each option must be 1-2 sentences, vivid, and meaningfully different from the others.
+Each option must be 3-4 sentences, vivid, and meaningfully different from the others.
 
 Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
 {"scenarios": ["option one", "option two", "option three"]}"""
@@ -123,30 +127,75 @@ Respond with ONLY the rewritten scenario as plain prose — no preamble, no labe
 no markdown, no quotes."""
 
 
+# Token budgets for /continue's two calls. The scene budget scales with the
+# user-chosen story length (short/medium/long); the fold budget is a flat
+# ceiling sized for 3 options x 3-4 sentences plus the summary. The summary
+# word target ALSO scales with length — a longer story needs more room to
+# retain named characters/facts without the compact-summary contract breaking.
+SCENE_BUDGETS = {"short": 600, "medium": 800, "long": 1000}
+FOLD_BUDGET = 800  # 3 options x 3-4 sentences + the summary
+SUMMARY_WORDS = {"short": 150, "medium": 200, "long": 250}
+
 # Call 1 of /continue — the "storyteller". Writes the actual scene as pure
 # prose (NO JSON): mixing creative prose into JSON is where models break
 # formatting, so prose stays prose.
 STORY_PROMPT = """You are the narrator of an interactive story.
-Write the next scene as vivid prose, 2-3 short paragraphs.
+Write the next scene as vivid prose, 2-4 short paragraphs.
 Follow the genre style exactly. Continue naturally from the story so far, and
-make the scene deliver on the chosen direction. End at a natural pause that
-invites the next choice. Respond with ONLY the scene prose — no title, no
-labels, no markdown."""
+make the scene deliver on the chosen direction. Ground the scene in its place
+the way published fiction does: concrete sensory detail — sound, light,
+weather, texture, smell — and let the setting itself carry story, not just
+dialogue and plot. End at a natural pause that invites the next choice.
+Respond with ONLY the scene prose — no title, no labels, no markdown."""
 
 # Call 2 of /continue — the "scribe". Mechanical job: fold the new scene into
 # a compact summary and offer the next 3 options. This is the cost-control
-# contract: a 50-turn story still sends ~150 words of history, not the
-# whole transcript.
+# contract: a 50-turn story still sends a bounded amount of history, not the
+# whole transcript — the exact word limit is supplied per-request (it scales
+# with story length) by build_fold_prompt, not baked into this static text.
 FOLD_PROMPT = """You are the scribe for an interactive story. You receive the
 story-so-far summary and the newest scene. Do two jobs:
 1. Fold the newest scene into an updated summary of the WHOLE story so far.
-   Keep it under 150 words. Preserve named characters, key facts, and
-   unresolved plot threads.
+   Keep it under the word limit given below. Preserve named characters, key
+   facts, and unresolved plot threads.
 2. Propose exactly 3 distinct options for what could happen next. Each option
-   must be 1-2 sentences and meaningfully different from the others.
+   must be 3-4 sentences, meaningfully different from the others, and a vivid
+   direction the story could take.
 
 Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
 {"summary": "updated summary", "scenarios": ["option one", "option two", "option three"]}"""
+
+
+def build_scene_prompt(template: dict, req: ContinueRequest) -> str:
+    """Assemble the storyteller prompt: static -> style -> beat -> dynamic."""
+    beats = story_beats.select_beats(template.get("structure"), req.turn, req.length)
+    beat_block = ""
+    if beats:
+        current, _ = beats
+        beat_block = f"\n\nCurrent story beat: {current['name']} — {current['guidance']}"
+    return (
+        f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}{beat_block}\n\n"
+        f"Story so far:\n{req.summary}\n\n"
+        f"Chosen direction:\n{req.chosen_scenario}"
+    )
+
+
+def build_fold_prompt(req: ContinueRequest, scene: str) -> str:
+    """Assemble the scribe prompt; the summary word budget scales with length."""
+    template = TEMPLATES.get(req.template_id, {})
+    beats = story_beats.select_beats(template.get("structure"), req.turn, req.length)
+    steer_block = ""
+    if beats:
+        _, nxt = beats
+        steer_block = (
+            f"\nSteer the options toward the next story beat: "
+            f"{nxt['name']} — {nxt['guidance']}"
+        )
+    return (
+        f"{FOLD_PROMPT}\n\nWord limit for the summary: "
+        f"{SUMMARY_WORDS[req.length]} words.{steer_block}\n\n"
+        f"Story-so-far summary:\n{req.summary}\n\nNewest scene:\n{scene}"
+    )
 
 
 # --- Mock mode -------------------------------------------------------------
@@ -175,9 +224,19 @@ MOCK_TURNS = [
             "forbidden lower stacks, following a corridor missing from every map."
         ),
         "scenarios": [
-            "Mira forces the iron door and finds a room where maps draw themselves.",
-            "A voice behind the door asks her, by name, to slide the map underneath.",
-            "The dripping stops — and footsteps begin, approaching from the corridor that shouldn't exist.",
+            "Mira forces the iron door with her shoulder and a mapmaker's stubbornness. "
+            "Inside, candlelight breathes over a great oak table. On it, a map of the "
+            "kingdom is drawing itself, ink crawling like patient ants. Every line is "
+            "perfect except the corridor she came by — which is being erased behind her.",
+            "A voice behind the door asks her, by name, to slide the map underneath. "
+            "Mira hesitates, her hand already halfway to her satchel. The voice sounds "
+            "tired, almost grateful, like it has been waiting longer than she has been "
+            "alive. She has to decide whether trust or caution gets to lead.",
+            "The dripping stops, and footsteps begin — slow, unhurried, approaching "
+            "from the corridor that shouldn't exist. Mira presses herself flat against "
+            "the cold iron, counting the steps instead of breathing. Whoever it is "
+            "knows exactly where she's standing. When the footsteps finally stop, they "
+            "stop right outside her door.",
         ],
     },
     {
@@ -194,9 +253,21 @@ MOCK_TURNS = [
             "and something is erasing the corridor behind her."
         ),
         "scenarios": [
-            "Mira grabs the pen mid-stroke and writes the corridor back in.",
-            "She follows the vanishing line out, racing the eraser to the exit.",
-            "She asks the room, aloud, who taught the maps to lie.",
+            "Mira grabs the pen mid-stroke and writes the corridor back in herself. "
+            "The ink fights her, curling away like it resents the correction. "
+            "Candlelight flickers as the whole room seems to hold its breath. If the "
+            "line holds, she'll have her way out; if it doesn't, she may be trapped "
+            "here for good.",
+            "She follows the vanishing line out, racing the eraser toward the exit. "
+            "Behind her the corridor closes stroke by stroke, faster than she can run. "
+            "Her boots skid on stone that hasn't finished drawing itself yet. She "
+            "reaches the threshold just as the last inch of floor disappears beneath "
+            "her heel.",
+            "She asks the room, aloud, who taught the maps to lie. For a long moment "
+            "only the candles answer, guttering all at once in a draft that came from "
+            "nowhere. Then the ink on the table rearranges itself into words she "
+            "almost recognizes. Whatever wrote them wants her to keep asking "
+            "questions.",
         ],
     },
     {
@@ -214,9 +285,20 @@ MOCK_TURNS = [
             "and hinted that the kingdom's maps lie by design."
         ),
         "scenarios": [
-            "Mira unrolls the corridor right there and walks into what it shows.",
-            "She bargains: the corridor's secret in exchange for fixing the maps.",
-            "She pockets the scroll and pretends not to care what it means.",
+            "Mira unrolls the corridor right there and steps into what it shows. The "
+            "scroll unfurls into a hallway that smells of rain that hasn't fallen yet. "
+            "Behind her, the chart-room folds itself away like it was never real. "
+            "Ahead, the corridor keeps going exactly as far as her nerve does.",
+            "She bargains: the corridor's secret in exchange for fixing the maps for "
+            "good. The folded creature tilts its paper head, considering, papers "
+            "rustling like a held breath. It says a fair trade requires a fair price, "
+            "and asks what she's willing to lose. Mira realizes she hasn't actually "
+            "decided yet.",
+            "She pockets the scroll and pretends not to care what it means. The "
+            "creature watches her with folds that might be amusement or something "
+            "older. Outside, the ordinary stacks wait exactly where she left them, "
+            "unchanged and unaware. But the scroll sits heavier in her satchel than "
+            "paper has any right to.",
         ],
     },
 ]
@@ -499,7 +581,7 @@ def suggest(req: SuggestRequest):
     # semi-static genre style second, dynamic premise last.
     text = call_gemini(
         f"{SYSTEM_PROMPT}{style_block}\n\nPremise: {req.premise}",
-        max_tokens=300,
+        max_tokens=600,
         temperature=0.9,
         label="suggest",
     )
@@ -526,18 +608,16 @@ def continue_story(req: ContinueRequest):
 
     # Call 1 — storyteller (creative): write the scene as pure prose.
     scene = call_gemini(
-        f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}\n\n"
-        f"Story so far:\n{req.summary}\n\n"
-        f"Chosen direction:\n{req.chosen_scenario}",
-        max_tokens=600,
+        build_scene_prompt(template, req),
+        max_tokens=SCENE_BUDGETS[req.length],
         temperature=0.9,
         label="scene",
     )
 
     # Call 2 — scribe (mechanical): fold scene into summary + next options.
     raw = call_gemini(
-        f"{FOLD_PROMPT}\n\nStory-so-far summary:\n{req.summary}\n\nNewest scene:\n{scene}",
-        max_tokens=400,
+        build_fold_prompt(req, scene),
+        max_tokens=FOLD_BUDGET,
         temperature=0.7,
         label="fold",
     )
@@ -553,10 +633,8 @@ def _stream_turn(req: ContinueRequest, template: dict):
     try:
         scene_parts: list[str] = []
         token_iter = call_gemini_stream(
-            f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}\n\n"
-            f"Story so far:\n{req.summary}\n\n"
-            f"Chosen direction:\n{req.chosen_scenario}",
-            max_tokens=600,
+            build_scene_prompt(template, req),
+            max_tokens=SCENE_BUDGETS[req.length],
             temperature=0.9,
             label="scene",
         )
@@ -566,8 +644,8 @@ def _stream_turn(req: ContinueRequest, template: dict):
 
         scene = "".join(scene_parts)
         raw = call_gemini(
-            f"{FOLD_PROMPT}\n\nStory-so-far summary:\n{req.summary}\n\nNewest scene:\n{scene}",
-            max_tokens=400,
+            build_fold_prompt(req, scene),
+            max_tokens=FOLD_BUDGET,
             temperature=0.7,
             label="fold",
         )
