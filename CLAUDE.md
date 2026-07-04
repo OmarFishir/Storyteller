@@ -147,21 +147,27 @@ FastAPI server in `main.py`:
   parsing — simpler than /suggest). Echoes `original` from the request rather than
   paying the model to reproduce it.
 - `POST /continue` — `{"template_id": "...", "summary": "...", "chosen_scenario": "...",
-  "turn": 1, "length": "short"}` → `{"scene": "...", "summary": "...", "scenarios": [...]}`.
+  "turn": 1, "length": "short", "notes": ""}` → `{"scene": "...", "summary": "...", "scenarios": [...]}`.
   The running-summary turn — the first cost-control piece actually wired up: the
   client carries the summary, so the backend stays stateless and never resends
   full story history. `turn` (1-based scene number, default `1`, `ge=1` → 422
   below that) and `length` (`"short" | "medium" | "long"`, default `"short"`)
   are carried by the client on every turn too (same carry-it-yourself pattern
   as `summary`) and drive beat selection + the token budgets below; the
-  defaults reproduce pre-structure behavior for any old caller. Two Gemini
+  defaults reproduce pre-structure behavior for any old caller. `notes`
+  (new, default `""`) carries the discussion channel's canon — see
+  `/converse/stream` below — into the scene prompt ONLY; the fold call that
+  updates the running summary never sees it, because summary = what HAPPENED
+  and notes = what IS TRUE, kept deliberately separate. Two Gemini
   calls per turn: (1) the "storyteller" (`build_scene_prompt`,
   `max_output_tokens=SCENE_BUDGETS[length]`, `temperature=0.9`) writes the next
   scene as pure prose — no JSON, so creative writing never fights JSON
   formatting — assembled in caching-friendly order: static `STORY_PROMPT` →
   genre style → current beat's `{name} — {guidance}` (via
   `story_beats.select_beats`, only when the template has a `structure`) →
-  story-so-far → chosen direction. `STORY_PROMPT` itself now also carries an
+  established story notes (`req.notes`, omitted entirely when empty, so an
+  empty-notes call reproduces a byte-identical prompt to pre-notes behavior,
+  pinned by test) → story-so-far → chosen direction. `STORY_PROMPT` itself now also carries an
   environmental-craft instruction: ground every scene in concrete sensory
   detail (sound, light, weather, texture) the way published fiction does, not
   just plot-advancing dialogue. (2) the "scribe" (`build_fold_prompt`,
@@ -199,6 +205,41 @@ FastAPI server in `main.py`:
   Gemini calls, doubles as the client-animation dev fixture. Mock mode ignores
   `turn`/`length` entirely — it exercises the pipe, not the prompts (verified:
   `turn=5, length="long"` still streams the correct next canned scene).
+- `POST /converse/stream` — the conversation channel beside the story engine,
+  same SSE shape and error contract as `/continue/stream`. Request:
+  `{"template_id": "...", "utterance": "...", "summary": "...", "notes": "",
+  "options": [...], "discussion": [...], "turn": 1, "length": "short"}` —
+  stateless, carry-it-yourself like `/continue`; `discussion` is the last
+  <=6 `{role: "user"|"ai", text}` entries (belt-and-braces cap — the client
+  caps it too). ONE fused cheap-model call (`build_converse_prompt`, label
+  `converse`, `CONVERSE_BUDGET=600`, `temperature=0.8`) whose FIRST LINE is a
+  machine-readable intent verdict — `INTENT: discuss | steer | options |
+  pick N` (`parse_intent_line`; N is 1-based in the model's mouth, converted
+  to a 0-based index on the wire) — and the prompt explicitly instructs
+  unsure → discuss, the cheap, story-safe default (a misroute costs one
+  reply, never a polluted story). Four routes: `discuss` streams the reply
+  prose that follows the intent line as `reply_token` frames, then a second
+  tiny call (`build_notes_prompt`, label `notes_fold`, `NOTES_BUDGET=200`,
+  `temperature=0.7`, capped at `NOTES_WORDS=120` words) folds any new durable
+  fact into the notes, ending in `discussion_complete {"notes": "..."}` —
+  summary = what HAPPENED (the fold call owns it), notes = what IS TRUE
+  (only this call ever writes notes). `steer`/`pick`/`options` never touch
+  the notes scribe and never stream prose — each emits ONE terminal `route`
+  frame (`{"intent": "pick", "index": N}` / `{"intent": "steer"}` /
+  `{"intent": "options", "scenarios": [...]}`, the last validated through the
+  same `parse_scenarios` as `/suggest`) for the client to act on. An
+  out-of-range or number-less pick downgrades to `pick_invalid` → a FIXED
+  clarification string (`pick_clarification`, no extra model call) streamed
+  as one `reply_token` + `discussion_complete` with notes UNCHANGED — never a
+  500, never a blind turn. A first line that isn't a recognizable INTENT
+  line at all is model garbage → clean 502 error frame. Same SSE error
+  contract as `/continue/stream`: anything after streaming starts becomes a
+  terminal `error` frame; tokens already sent are kept. Mock mode
+  (`?mock=true`, `DEV_MOCK_ENABLED` gate, 403 if unset) triggers on the
+  utterance text alone: "idea"/"option" → canned `options` route
+  (`MOCK_TURNS[0]`'s scenarios); an utterance starting "she "/"he "/"they " →
+  canned `steer` route; anything else → a canned discuss reply + canned
+  notes (`MOCK_CONVERSE_REPLY` / `MOCK_CONVERSE_NOTES`) — zero Gemini calls.
 - `call_gemini(contents, max_tokens, temperature, label="unlabeled")` — the ONE
   shared helper every endpoint uses. Error handling (hardened after the Phase 1
   final review): retries transient `errors.ServerError` (5xx) up to 3 times with
@@ -235,9 +276,11 @@ zero summarization. Scenes live in client state per session today; the
 reading/export view arrives with persistence in Phase 3. Full design:
 `docs/superpowers/specs/2026-07-03-story-structure-design.md`.
 
-Tests in `tests/test_api.py`, `tests/test_templates.py`, and `tests/test_beats.py`
-(pytest + FastAPI `TestClient`, **69 tests** — incl. the corrected next-TURN
-fold-steering pinning test above and a stream-path scene-budget pin): health
+Tests in `tests/test_api.py`, `tests/test_templates.py`, `tests/test_beats.py`,
+and `tests/test_converse.py`
+(pytest + FastAPI `TestClient`, **102 tests** — up from 69; the delta is
+`test_converse.py`'s new suite plus 3 notes-aware additions to
+`test_api.py`): health
 check; retry-then-succeed
 and retry-exhaustion → 503; 429-without-retry and other-4xx passthrough;
 empty-response → 502; /suggest shape bare and with `template_id` (404 on
@@ -266,7 +309,28 @@ starts); CORS headers present; the real streaming path emitting `scene_token*`
 → `turn_complete`, scribe-garbage becoming an `error` frame, and a mid-stream
 failure keeping already-sent tokens; a regression test pinning `/continue`'s
 behavior unchanged after its validation was refactored into the shared
-`validate_turn_payload()` helper. Tests MOCK the Gemini layer — enforced
+`validate_turn_payload()` helper; and — new for `/continue`'s `notes` field —
+the scene prompt slotting notes between the current beat and the
+story-so-far, an empty-notes prompt staying byte-identical to pre-notes
+behavior, and `/continue/stream` accepting and using `notes`.
+`tests/test_converse.py` covers the whole `/converse/stream` channel:
+`parse_intent_line` for all four intents plus case/whitespace tolerance, an
+out-of-range or number-less pick downgrading to `pick_invalid` (never a
+crash), a non-INTENT first line raising a clean 502; `pick_clarification`'s
+card-count wording (incl. the zero-cards case); `parse_notes`'s happy path
+and its missing-key 502; `build_converse_prompt`'s pinned assembly order
+(static → style → notes → summary → options → discussion → utterance) and
+its empty-context placeholders; `build_notes_prompt` carrying the word limit
+and all three pieces; the real streaming path — discuss streaming
+`reply_token`s then folding notes via the separate `notes_fold` call,
+pick/steer/options each emitting exactly one `route` frame (empty options
+scenarios → error frame), an invalid pick answering with the fixed
+clarification and unchanged notes with NO scribe call reached, a garbage
+intent line and notes-scribe garbage both becoming 502 error frames, a
+mid-stream failure keeping already-sent tokens, and 404/422 before streaming
+starts; plus mock mode (env-gate 403 when unset, the canned discuss reply +
+canned notes, and the "idea"/"option" → options and "she/he/they " → steer
+utterance triggers). Tests MOCK the Gemini layer — enforced
 structurally: `tests/conftest.py` sets a dummy `GEMINI_API_KEY` (suite runs on
 a clean clone, no `.env` needed) and an autouse tripwire makes any un-mocked
 Gemini call fail loudly. Run: `venv\Scripts\python.exe -m pytest tests/ -v`.
@@ -330,55 +394,71 @@ deviation from the original spec's `app/`).
   the premise box (rendered only once a template is selected and voice input
   is available); the final transcript replaces the premise value directly —
   the input itself is the confirm step, no separate confirmation UI on Home.
-  `story.tsx` (Story) — runs the turn loop against `POST /continue/stream`: an
-  effect kicks off the opening turn on mount, `token` events accumulate into
-  `StreamingText`, `turn_complete` archives the finished scene and renders
-  however many option cards the server actually sent (not hardcoded to 3), a
-  `streamingRef` flag ignores a second tap while a turn is already streaming;
-  a reactive `isStreaming` state mirrors that same ref (set together when a turn
-  starts, reset together in `runTurn`'s `finally`) so streaming state can drive
-  UI, not just gate logic. Every request (mount-effect and each chosen option) carries
-  `turn: scenes.length + 1` and the `length` read from the route param via
-  `resolveStoryLength()` — the route param is an unchecked value (URL-editable
-  on web, and can arrive as an array if the query string duplicates the key),
-  so anything other than exactly `"short"` / `"medium"` / `"long"` falls back
-  to `"short"` rather than being cast straight through to the backend — the
-  same carry-it-yourself pattern as the backend's `summary`; retry re-sends
-  the frozen, already-built request object unchanged, so retrying never
-  advances the turn counter or changes the beat the story is on. A
-  `stream_error` event drives a retry banner via `errorMessage()`: 429 → the
-  daily-quota message, 503 → "the muse is busy", status 0 → renders the
-  client-authored `detail` string verbatim (the connection-lost /
-  can't-reach-backend copy from `lib/api.ts`), anything else → a generic
-  "Something went wrong — tap to retry." fallback.
-  **Slice C additions:** the root is now a flex `View` with the scene/options
-  `ScrollView` above and the `PushToTalk` bar pinned in a `pttArea` `View`
-  BELOW it, outside the ScrollView, so the mic stays visible while scrolling
-  story text; a "← Home" `Pressable` (`router.back()`) sits in a header row
-  above the ScrollView. Story keeps an `AbortController` ref, created fresh
-  each `runTurn` and threaded into `streamTurn`'s `signal`; an unmount effect
-  calls `abortRef.current?.abort()` (stop billing a screen nobody is
-  watching) and clears any pending confirm timeout. A spoken utterance flows
-  through `handleUtterance`: `matchCard(utterance, options)` decides card vs.
-  free-form, then a confirm bar renders `Heard: "..." → choosing option N`
-  (with that card visually highlighted) or `→ steering the story`; a 1.5s
-  timeout auto-fires `handleChoose` with either `options[matchedIndex]` or the
-  raw utterance — the SAME `handleChoose`/`runTurn` path option-card taps use,
-  so the turn clock, frozen-retry object, and overlap guard are inherited for
-  free — or a Cancel button clears the pending timeout instead. The
-  `PushToTalk` bar is `disabled` while streaming or while a confirm is
-  pending.
+  `story.tsx` (Story) — a typed feed drives the screen: `FeedItem` is
+  `{kind: "scene", text}` | `{kind: "user_bubble", text}` |
+  `{kind: "ai_bubble", text}` | `{kind: "cards", options}`, rendered in order
+  inside one `ScrollView`. `scenes` (the array of verbatim scene strings)
+  stays separate from `feed` and remains the canonical story + turn clock
+  (`turn: scenes.length + 1` on every request) — the hard invariant above is
+  untouched by the conversational feature. `runTurn` (against
+  `POST /continue/stream`) is unchanged in shape: `token` events accumulate
+  into `StreamingText`, `turn_complete` archives the scene into both `scenes`
+  and `feed` (a scene item + a fresh `cards` item for the server's returned
+  options, after dropping any leftover `cards` item — an offer is consumed by
+  the next turn) and updates `summary`; `turn`/`length` carrying, the
+  `resolveStoryLength()` fallback, and the frozen-retry-object semantics are
+  all as before. A spoken (or typed) utterance flows through
+  `handleUtterance`: `matchCard(utterance, options)` — now ORDINALS ONLY,
+  see `lib/matchCard.ts` below — either fires `handleChoose` (the SAME
+  `runTurn` path option-card taps use) INSTANTLY, no confirm window, or falls
+  through to `runConverse(utterance)`. **The slice C confirm bar and its 1.5s
+  auto-fire window are REMOVED** (owner decision: silent routing — an
+  ordinal match is unambiguous enough to act on immediately, and anything
+  else is better served by an actual conversational reply than a guessed
+  paraphrase). `runConverse` posts to `POST /converse/stream` carrying
+  `utterance, summary, notes, options, discussion` (the last <=6 turns,
+  capped the same way on both sides) plus `turn`/`length`; it optimistically
+  appends a `user_bubble` to the feed and the discussion tail, streams
+  `reply_token`s into a live `ai_bubble` (`StreamingText`, keyed by an
+  incrementing `replyCount` so each reply animates independently), and on
+  `discussion_complete` commits the finished bubble to `feed`/`discussion`
+  and the returned `notes` to state — notes are canon; they only change
+  through this event. A `route` frame (pick/steer/options) is acted on AFTER
+  the stream loop and guard release: `pick`/`steer` call `handleChoose`
+  (the indexed card, or the utterance verbatim); `options` swaps the current
+  `cards` feed item for the fresh scenarios without running a turn. `runTurn`
+  and `runConverse` share one `streamingRef`/`isStreaming` busy guard (a card
+  tap can't race a live conversation or vice versa) and one
+  `AbortController` ref; a "■ Stop" control (rendered only while
+  `isStreaming`) aborts whichever stream is live — silently, via
+  `streamPost`'s shared abort semantics, never surfacing as an error, and any
+  partial scene or reply already shown is kept. A converse failure arms
+  `pendingConverse` (the failed utterance) instead of `pendingTurn`;
+  `handleRetry` re-runs `runConverse` (never a stale turn) when it's set,
+  replaying the SAME discussion tail rather than double-appending the user's
+  line. The unmount effect (abort on navigate-away) and the `stream_error` →
+  `errorMessage()` banner (429/503/status-0/generic) are unchanged from
+  slice B/C. The "← Home" `Pressable` (`router.back()`) still sits in a
+  header row above the ScrollView, and the `PushToTalk` bar still lives
+  BELOW the ScrollView in a `pttArea` `View` so it stays visible while
+  scrolling.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
-  `turn_complete` / `error` server events into one `StreamEvent` union.
-  Malformed JSON in a known event becomes `stream_error` 500; an unknown
-  event name is silently ignored ONLY when its frame's JSON parses cleanly
-  (forward-compat with future backend events) — malformed JSON in ANY frame,
-  known event or unknown, still yields a `stream_error`.
-- **`lib/api.ts`** — `getTemplates()` and `streamTurn()`, the app's only two
-  calls into the backend. `streamTurn(body, opts?: { signal?: AbortSignal })`
-  (slice C) takes an optional `AbortSignal`: a deliberate abort — an
+  `turn_complete` / `error` (story channel) and `reply_token` /
+  `discussion_complete` / `route` (converse channel) server events into one
+  `StreamEvent` union. Malformed JSON in a known event becomes `stream_error`
+  500; an unknown event NAME is silently ignored ONLY when its frame's JSON
+  parses cleanly (forward-compat with future backend events) — malformed
+  JSON in ANY frame, known event or unknown, still yields a `stream_error`.
+  A `route` frame with a recognized event name but an intent the client
+  can't act on (anything other than `pick`/`steer`/`options`) is a BROKEN
+  CONTRACT, not forward-compat, so it also yields `stream_error` rather than
+  being silently ignored.
+- **`lib/api.ts`** — `getTemplates()`, `streamTurn()`, and `converse()` (new),
+  the app's three calls into the backend. `streamTurn` and `converse` both
+  run through one shared generator, `streamPost(url, body, opts?: { signal?:
+  AbortSignal })`, so they get identical semantics: a deliberate abort — an
   `AbortError` thrown by the initial `fetch` OR one raised mid-read while
   consuming the response body — ends the generator SILENTLY, never as a
   `stream_error`; `reader.cancel()` runs best-effort in a `finally` regardless
@@ -389,7 +469,10 @@ deviation from the original spec's `app/`).
   mid-stream after tokens already arrived (`status: 0`, "Connection lost
   mid-story. Tap to retry.") all surface through the SAME `stream_error` event
   that real backend `error` frames use — the UI renders exactly one failure
-  path, never a raw thrown exception.
+  path, never a raw thrown exception. `converse()` posts to
+  `POST /converse/stream` with the `ConverseRequest` shape (`template_id,
+  utterance, summary, notes, options, discussion, turn, length`); both
+  functions append `?mock=true` under `EXPO_PUBLIC_USE_MOCK`.
 - **`lib/fetch.ts`** — `streamingFetch`, a one-line seam wrapping `expo/fetch`
   (streams response bodies on native; web's native `fetch` already streams).
   Tests mock this single function instead of touching the network.
@@ -413,20 +496,23 @@ deviation from the original spec's `app/`).
   implementation (`expo-speech-recognition`, needs a dev build) arrives later
   behind this SAME interface — that task is still pending.
 - **`lib/matchCard.ts`** — `matchCard(utterance, cards): number | null`, a
-  pure function: no network, no LLM (deliberately cheap; upgradeable in
-  isolation later). Two rules, in order: (1) GUARDED ordinals — "second",
-  "option 2", "the last one", or a pick-verb ("pick"/"take"/"choose"/"option"/
-  "select"/"go with"/"number"/"card") — checked most-specific-first so "the
-  second one" hits "second" and not "one"; ordinals only fire when the
-  utterance LOOKS like a pick (`<= 4` words OR a pick-word present), because
-  bare words like "first"/"two" show up constantly in narrative steering
-  sentences ("at first she hesitated..."); an ordinal past the end of `cards`
-  returns `null` (out-of-bounds). (2) Word overlap — content words (length >
-  3, stopwords stripped) shared between the utterance and each card; a card
-  wins only with >= 2 overlapping words AND a strictly higher score than the
-  runner-up (a tie, or no card clearing 2, → `null`). `null` from either rule
-  → the caller (Story's `handleUtterance`) treats the utterance as free-form
-  steering rather than a card pick.
+  pure function: no network, no LLM (deliberately cheap — the free fast-path
+  before falling back to `/converse`). ONE rule now, GUARDED ordinals only —
+  "second", "option 2", "the last one", or a pick-verb ("pick"/"take"/
+  "choose"/"option"/"select"/"go with"/"number"/"card") — checked
+  most-specific-first so "the second one" hits "second" and not "one";
+  ordinals only fire when the utterance LOOKS like a pick (`<= 4` words OR a
+  pick-word present), because bare words like "first"/"two" show up
+  constantly in narrative steering sentences ("at first she hesitated...");
+  an ordinal past the end of `cards` returns `null` (out-of-bounds). The
+  WORD-OVERLAP tier (content words shared between the utterance and a card's
+  text) is RETIRED — it couldn't distinguish "do the iron door one" (a pick)
+  from "tell me more about the iron door one" (a question about that card's
+  content), and auto-picking a question was exactly the rigidity the
+  conversational redesign set out to remove. `null` → the caller (Story's
+  `handleUtterance`) routes the utterance to `/converse`, where a model
+  decides pick / steer / discuss / options with actual context instead of
+  guessing from word overlap.
 - **`components/StreamingText.tsx`** — the signature word-materialize
   animation (Reanimated `FadeInDown` per word). Contract: append-only — pass
   the FULL accumulated text each render; already-rendered words keep stable
@@ -454,48 +540,58 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **62 tests** across 8 suites):
-  `lib/__tests__/sse.test.ts` (frame parsing incl. chunk-split and
-  separator-split cases, malformed JSON, unknown events);
-  `lib/__tests__/api.test.ts` (`streamTurn`'s single error channel incl. the
-  status-0 connection-loss and pre-stream-404 cases, plus — new (slice C) —
-  the `AbortSignal` passthrough: a deliberate abort on the initial fetch and a
-  mid-stream-read abort both end the generator silently with no
-  `stream_error`, and the signal is threaded through to `fetch` with
-  `reader.cancel()` on early exit); `lib/__tests__/smoke.test.ts`;
-  `lib/__tests__/voice.test.ts` (new — `getVoiceIn`: unavailable with no
-  `SpeechRecognition` global, interim transcripts streaming then a final
-  delivered on `stop()`, `abort()` discarding everything with no final,
-  permission-denial mapped to a friendly message, a second `start()`
-  aborting the superseded session with no orphaned mic); `lib/__tests__/matchCard.test.ts`
-  (new — guarded ordinals incl. "the last one" and out-of-bounds, bare
-  ordinal words inside long sentences NOT matching, pick-verbs unlocking
-  ordinals in longer utterances, word-overlap picking a clear winner,
-  ambiguous/gibberish/empty utterances all returning `null`, and "last"
-  with an empty cards list returning `null` — not `-1` — so a spoken "the
-  last one" at a retry banner falls through to free-form steering);
-  `components/__tests__/StreamingText.test.tsx` (append-only rendering,
-  paragraph breaks); `app/__tests__/index.test.tsx` (card-per-template, seed
-  tap, load-failure retry, passing the chosen length to the story route, and
-  — new (slice C) — the mic filling the premise input with the spoken
-  transcript); `app/__tests__/story.test.tsx` (full turn loop, option cards
-  tracking arrival count, mid-stream error keeps partial text, the status-0
-  connection-lost detail rendering verbatim, 429 daily-quota message, retry
-  re-runs the same turn, overlapping-tap guard, every request carrying
-  `turn`/`length` and retry never advancing the turn number, and — new
-  (slice C) — a push-to-talk block: aborting the in-flight stream on unmount,
-  a spoken ordinal picking a card and auto-firing after the confirm window,
-  unmatched speech steering the story free-form, Cancel inside the confirm
-  window discarding the utterance, PTT disabled while a turn is streaming, a
-  mic-permission error rendering inline, the "← Home" back control
-  existing, and a card tap during the confirm window discarding the pending
-  spoken utterance — no stale-timer double turn); a `resolveStoryLength`
-  unit-test block (4 tests) pinning the
-  total fallback to `"short"` for an invalid string, an array (duplicated
-  query param), and a missing value. Gemini is never reached from these
-  tests — the backend has its own separate suite.
+- Tests (jest-expo preset, `restoreMocks: true`, **77 tests** across 8
+  suites, up from 62): `lib/__tests__/sse.test.ts` (frame parsing incl.
+  chunk-split and separator-split cases, malformed JSON, unknown events, and
+  — new — `reply_token`/`discussion_complete` parsing plus all three `route`
+  intents, with an unrecognized route intent yielding `stream_error` rather
+  than being silently ignored); `lib/__tests__/api.test.ts` (`streamTurn`'s
+  single error channel incl. the status-0 connection-loss and pre-stream-404
+  cases, the `AbortSignal` passthrough: a deliberate abort on the initial
+  fetch and a mid-stream-read abort both end the generator silently with no
+  `stream_error`, `reader.cancel()` on early exit — and, new, `converse()`
+  posting to `/converse/stream` and yielding parsed frames while sharing
+  `streamTurn`'s single error channel and silent-abort semantics);
+  `lib/__tests__/smoke.test.ts`; `lib/__tests__/voice.test.ts` (`getVoiceIn`:
+  unavailable with no `SpeechRecognition` global, interim transcripts
+  streaming then a final delivered on `stop()`, `abort()` discarding
+  everything with no final, permission-denial mapped to a friendly message, a
+  second `start()` aborting the superseded session with no orphaned mic);
+  `lib/__tests__/matchCard.test.ts` (SLIMMED to ordinals-only: guarded
+  ordinals incl. "the last one" and out-of-bounds, bare ordinal words inside
+  long sentences NOT matching, pick-verbs unlocking ordinals in longer
+  utterances, "last" with an empty cards list returning `null` — not `-1` —
+  and, replacing the retired word-overlap tests, a block proving content
+  references like "tell me more about the iron door one" and "the door" all
+  return `null` — i.e. route to `/converse` instead of being guessed as a
+  pick); `components/__tests__/StreamingText.test.tsx` (append-only
+  rendering, paragraph breaks); `app/__tests__/index.test.tsx`
+  (card-per-template, seed tap, load-failure retry, passing the chosen
+  length to the story route, and the mic filling the premise input with the
+  spoken transcript); `app/__tests__/story.test.tsx` (the story-turn block:
+  full turn loop, option cards tracking arrival count, mid-stream error
+  keeps partial text, the status-0 connection-lost detail rendering
+  verbatim, 429 daily-quota message, retry re-runs the same turn,
+  overlapping-tap guard, every request carrying `turn`/`length` and retry
+  never advancing the turn number, aborting the in-flight stream on unmount;
+  plus a REWRITTEN push-to-talk block for the conversational feature: a
+  spoken ordinal picks a card immediately with no `/converse` call at all;
+  non-ordinal speech calls `/converse` carrying notes/options/the discussion
+  tail, and that notes+tail correctly carry into the NEXT converse call;
+  `route` frames for pick/steer/options each drive the right client action
+  (firing a turn verbatim, firing a turn with the indexed card, or swapping
+  the option cards without running a turn); the "■ Stop" control aborts a
+  streaming reply silently and keeps the partial bubble with no error
+  painted; retry after a converse failure re-runs the CONVERSATION, not a
+  turn, and does not duplicate the optimistic user bubble or discussion
+  entry; consumed cards disappear once the next turn starts; PTT stays
+  disabled while a turn is streaming; a mic-permission error renders inline;
+  the "← Home" back control exists); a `resolveStoryLength` unit-test block
+  (4 tests) pinning the total fallback to `"short"` for an invalid string, an
+  array (duplicated query param), and a missing value. Gemini is never
+  reached from these tests — the backend has its own separate suite.
   Run: `cd client && npx jest --watchAll=false`.
-- Verified 2026-07-04: `npx jest --watchAll=false` → 62/62 passing across 8
+- Verified 2026-07-04: `npx jest --watchAll=false` → 77/77 passing across 8
   suites; `npx tsc --noEmit` clean; `npx expo export --platform web` produces
   a static bundle (`client/dist/`, git-ignored) with no errors.
 - Final-review hardening (same day, commit `57da2f7`): `matchCard`'s "last"
@@ -503,9 +599,11 @@ deviation from the original spec's `app/`).
   live recognition on unmount (no hot mic / ghost turn after navigating
   away); `streamTurn`'s `reader.cancel()` rejection is swallowed on the
   promise itself (it rejects on an errored/aborted stream — a sync
-  try/catch can't catch it); `runTurn` cancels any pending confirm timer
-  right after its overlap guard, so tapping a card or retry during the
-  confirm window discards the spoken utterance instead of double-firing.
+  try/catch can't catch it); `runTurn` cancelled any pending confirm timer
+  right after its overlap guard so a card tap or retry during the confirm
+  window couldn't double-fire — moot now that the confirm bar/timer itself
+  is gone (see the Story screen description above; conversational
+  co-creation replaced it with instant ordinal picks + a "■ Stop" control).
 
 ## Environment / how to run
 
@@ -531,14 +629,20 @@ The approved phase plan lives in
    live-verified against real Gemini; see "What's BUILT and WORKING" above.
 2. **Phase 2 (IN PROGRESS): vertical slice** — Expo app skeleton, streaming (SSE)
    story view with animated text, push-to-talk on-device speech recognition,
-   narration v1 (quality TTS ~$5 + device-TTS fallback), abortable playback.
+   conversational co-creation (discuss/steer/pick/options routed through one
+   fused call), narration v1 (quality TTS ~$5 + device-TTS fallback),
+   abortable playback.
    Slice A (backend SSE streaming + mock mode) DONE. Slice B (Expo app: screens,
-   `lib/` bridge, StreamingText animation) DONE — see "Client app (`client/`)"
-   above. Slice C (push-to-talk: `VoiceIn` abstraction, `matchCard`, the PTT
-   bar + confirm-bar flow, abort plumbing) is BROWSER-COMPLETE — see "Client
-   app (`client/`)" above; the native build (`expo-speech-recognition` behind
-   the same `VoiceIn` interface) is still pending, blocked on the user's phone
-   OS decision. Slice D (narration v1) next.
+   `lib/` bridge, StreamingText animation) DONE. Slice C (push-to-talk +
+   conversational co-creation: `VoiceIn` abstraction, the ordinals-only
+   `matchCard` fast-path, `/converse/stream`, the feed/bubble UI, notes
+   canon) SHIPPED and mock-verified in the browser — see "Client app
+   (`client/`)" above; the confirm-bar flow from the original push-to-talk
+   design was removed along the way in favor of instant ordinal picks + a
+   stop control. The native build (`expo-speech-recognition` behind the same
+   `VoiceIn` interface) is still pending, parked on the user's phone-OS
+   decision. Slice D (narration v1) is next, designing against the feed
+   model (scene text + bubbles) this slice introduced.
 3. **Phase 3: product core** — story persistence (SQLite, story IDs), voice-driven
    editing with morph animation, prompt caching, latency/failure UX.
 4. **Phase 4: expressive narration** — streamed audio, per-genre voices, loose sync.
