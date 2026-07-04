@@ -65,6 +65,7 @@ describe("Story", () => {
         chosen_scenario: "Open the story.",
         turn: 1,
         length: "short",
+        notes: "",
       },
       expect.anything()
     );
@@ -97,6 +98,7 @@ describe("Story", () => {
         chosen_scenario: "Option A",
         turn: 2,
         length: "short",
+        notes: "",
       },
       expect.anything()
     );
@@ -251,40 +253,39 @@ describe("push-to-talk", () => {
     mockVoiceFake.stop.mockClear();
   });
 
-  it("spoken ordinal picks a card after the confirm window", async () => {
-    jest.useFakeTimers();
-    const spy = jest
+  it("spoken ordinal picks a card immediately - no confirm window, no converse", async () => {
+    const turnSpy = jest
       .spyOn(api, "streamTurn")
       .mockReturnValueOnce(happyTurn())
       .mockReturnValueOnce(happyTurn());
+    const converseSpy = jest.spyOn(api, "converse");
 
     const { getByText, getByTestId } = render(<Story />);
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
     const cb = mockVoiceFake.start.mock.calls[0][0];
-    act(() => cb.onInterim("the second"));
-    expect(getByText(/the second/)).toBeTruthy(); // live transcript visible
     fireEvent(getByTestId("ptt-button"), "pressOut");
     act(() => cb.onFinal("the second one"));
 
-    expect(getByText(/choosing option 2/i)).toBeTruthy();
-    act(() => jest.advanceTimersByTime(1600));
     await waitFor(() =>
-      expect(spy).toHaveBeenLastCalledWith(
+      expect(turnSpy).toHaveBeenLastCalledWith(
         expect.objectContaining({ chosen_scenario: "Ask the voice its name" }),
         expect.anything()
       )
     );
-    jest.useRealTimers();
+    expect(converseSpy).not.toHaveBeenCalled();
   });
 
-  it("unmatched speech steers the story free-form", async () => {
-    jest.useFakeTimers();
-    const spy = jest
-      .spyOn(api, "streamTurn")
-      .mockReturnValueOnce(happyTurn())
-      .mockReturnValueOnce(happyTurn());
+  it("non-ordinal speech goes to converse with notes, options, and tail", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const converseSpy = jest.spyOn(api, "converse").mockReturnValueOnce(
+      fixtureStream([
+        { type: "reply_token", t: "She is " },
+        { type: "reply_token", t: "stubborn." },
+        { type: "discussion_complete", notes: "Mira is stubborn." },
+      ])
+    );
 
     const { getByText, getByTestId } = render(<Story />);
     await waitFor(() => getByText(/Force the iron door/));
@@ -292,44 +293,109 @@ describe("push-to-talk", () => {
     fireEvent(getByTestId("ptt-button"), "pressIn");
     const cb = mockVoiceFake.start.mock.calls[0][0];
     fireEvent(getByTestId("ptt-button"), "pressOut");
-    act(() => cb.onFinal("she sets fire to the archive and flees north"));
+    act(() => cb.onFinal("tell me more about the voice"));
 
-    expect(getByText(/steering the story/i)).toBeTruthy();
-    act(() => jest.advanceTimersByTime(1600));
+    await waitFor(() => getByText(/She is stubborn./)); // AI bubble streamed
+    expect(getByText(/tell me more about the voice/)).toBeTruthy(); // user bubble
+    expect(converseSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        utterance: "tell me more about the voice",
+        notes: "",
+        options: [
+          "Force the iron door open now",
+          "Ask the voice its name",
+          "Run from the footsteps",
+        ],
+        discussion: [{ role: "user", text: "tell me more about the voice" }],
+        template_id: "fantasy",
+      }),
+      expect.anything()
+    );
+  });
+
+  it("notes and the discussion tail carry into the NEXT converse call", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const converseSpy = jest
+      .spyOn(api, "converse")
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "reply_token", t: "A stubborn mapmaker." },
+          { type: "discussion_complete", notes: "Mira is stubborn." },
+        ])
+      )
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "reply_token", t: "Fire, when she was nine." },
+          { type: "discussion_complete", notes: "Mira is stubborn; fears fire." },
+        ])
+      );
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    const speak = (text: string) => {
+      fireEvent(getByTestId("ptt-button"), "pressIn");
+      const calls = mockVoiceFake.start.mock.calls;
+      const cb = calls[calls.length - 1][0];
+      fireEvent(getByTestId("ptt-button"), "pressOut");
+      act(() => cb.onFinal(text));
+    };
+
+    speak("who is she really");
+    await waitFor(() => getByText(/A stubborn mapmaker./));
+    speak("what is she afraid of");
+    await waitFor(() => getByText(/Fire, when she was nine./));
+
+    expect(converseSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        notes: "Mira is stubborn.",
+        discussion: [
+          { role: "user", text: "who is she really" },
+          { role: "ai", text: "A stubborn mapmaker." },
+          { role: "user", text: "what is she afraid of" },
+        ],
+      }),
+      expect.anything()
+    );
+  });
+
+  it("route steer fires the turn with the utterance verbatim", async () => {
+    const turnSpy = jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(happyTurn());
+    jest
+      .spyOn(api, "converse")
+      .mockReturnValueOnce(fixtureStream([{ type: "route", intent: "steer" }]));
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("she burns the letter and runs north"));
+
     await waitFor(() =>
-      expect(spy).toHaveBeenLastCalledWith(
+      expect(turnSpy).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          chosen_scenario: "she sets fire to the archive and flees north",
+          chosen_scenario: "she burns the letter and runs north",
         }),
         expect.anything()
       )
     );
-    jest.useRealTimers();
   });
 
-  it("cancel inside the confirm window discards the utterance", async () => {
-    jest.useFakeTimers();
-    const spy = jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
-
-    const { getByText, getByTestId } = render(<Story />);
-    await waitFor(() => getByText(/Force the iron door/));
-
-    fireEvent(getByTestId("ptt-button"), "pressIn");
-    const cb = mockVoiceFake.start.mock.calls[0][0];
-    fireEvent(getByTestId("ptt-button"), "pressOut");
-    act(() => cb.onFinal("the second one"));
-    fireEvent.press(getByText(/cancel/i));
-    act(() => jest.advanceTimersByTime(2000));
-    expect(spy).toHaveBeenCalledTimes(1); // only the opening turn
-    jest.useRealTimers();
-  });
-
-  it("a card tap during the confirm window discards the pending utterance, not the stale spoken one", async () => {
-    jest.useFakeTimers();
-    const spy = jest
+  it("route pick fires the turn with the picked card", async () => {
+    const turnSpy = jest
       .spyOn(api, "streamTurn")
       .mockReturnValueOnce(happyTurn())
       .mockReturnValueOnce(happyTurn());
+    jest
+      .spyOn(api, "converse")
+      .mockReturnValueOnce(
+        fixtureStream([{ type: "route", intent: "pick", index: 2 }])
+      );
 
     const { getByText, getByTestId } = render(<Story />);
     await waitFor(() => getByText(/Force the iron door/));
@@ -337,21 +403,89 @@ describe("push-to-talk", () => {
     fireEvent(getByTestId("ptt-button"), "pressIn");
     const cb = mockVoiceFake.start.mock.calls[0][0];
     fireEvent(getByTestId("ptt-button"), "pressOut");
-    act(() => cb.onFinal("the second one")); // matches "Ask the voice its name"
-    expect(getByText(/choosing option 2/i)).toBeTruthy();
+    act(() => cb.onFinal("the one where someone is coming"));
 
-    // Tap a DIFFERENT card before the 1.5s confirm window elapses.
-    fireEvent.press(getByText("Force the iron door open now"));
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
-    expect(spy).toHaveBeenLastCalledWith(
-      expect.objectContaining({ chosen_scenario: "Force the iron door open now" }),
-      expect.anything()
+    await waitFor(() =>
+      expect(turnSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ chosen_scenario: "Run from the footsteps" }),
+        expect.anything()
+      )
+    );
+  });
+
+  it("route options replaces the cards without running a turn", async () => {
+    const turnSpy = jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    jest.spyOn(api, "converse").mockReturnValueOnce(
+      fixtureStream([
+        {
+          type: "route",
+          intent: "options",
+          scenarios: ["Fresh idea one", "Fresh idea two", "Fresh idea three"],
+        },
+      ])
     );
 
-    // The stale spoken-utterance timer must not fire a redundant third turn.
-    act(() => jest.advanceTimersByTime(2000));
-    expect(spy).toHaveBeenCalledTimes(2);
-    jest.useRealTimers();
+    const { getByText, getByTestId, queryByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("give me some different ideas"));
+
+    await waitFor(() => getByText("Fresh idea one"));
+    expect(queryByText(/Force the iron door/)).toBeNull(); // old cards replaced
+    expect(turnSpy).toHaveBeenCalledTimes(1); // opening turn only
+  });
+
+  it("stop aborts a streaming reply silently and keeps the partial bubble", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    let capturedSignal: AbortSignal | undefined;
+    let release: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    jest.spyOn(api, "converse").mockImplementation(function (
+      _req: unknown,
+      opts?: { signal?: AbortSignal }
+    ) {
+      capturedSignal = opts?.signal;
+      return (async function* () {
+        yield { type: "reply_token", t: "Partial thought " } as const;
+        await gate; // reply never finishes on its own
+      })() as never;
+    });
+
+    const { getByText, getByTestId, queryByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("tell me about the dripping water"));
+
+    await waitFor(() => getByText(/Partial thought/));
+    fireEvent.press(getByTestId("stop-button"));
+    expect(capturedSignal?.aborted).toBe(true);
+    await act(async () => release!());
+    await waitFor(() => expect(queryByText(/tap to retry/i)).toBeNull()); // no error painted
+    expect(getByText(/Partial thought/)).toBeTruthy(); // partial bubble kept
+  });
+
+  it("consumed cards disappear when the next turn starts", async () => {
+    jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "token", t: "Next scene." },
+          { type: "turn_complete", summary: "s2", scenarios: ["Only new option"] },
+        ])
+      );
+
+    const { getByText, queryByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+    fireEvent.press(getByText("Ask the voice its name"));
+    await waitFor(() => getByText("Only new option"));
+    expect(queryByText(/Force the iron door/)).toBeNull();
   });
 
   it("PTT is disabled while a turn is streaming", async () => {

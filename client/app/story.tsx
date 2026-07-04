@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
-import { streamTurn, StoryLength, TurnRequest } from "../lib/api";
+import {
+  streamTurn,
+  converse,
+  StoryLength,
+  TurnRequest,
+  DiscussionEntry,
+} from "../lib/api";
 import { StreamingText } from "../components/StreamingText";
 import { PushToTalk } from "../components/PushToTalk";
 import { matchCard } from "../lib/matchCard";
 
-type ConfirmPending = { utterance: string; matchedIndex: number | null };
+type FeedItem =
+  | { kind: "scene"; text: string }
+  | { kind: "user_bubble"; text: string }
+  | { kind: "ai_bubble"; text: string }
+  | { kind: "cards"; options: string[] };
 
 type StreamError = { status: number; detail: string };
 
@@ -37,56 +47,75 @@ export default function Story() {
   }>();
   const storyLength: StoryLength = resolveStoryLength(length);
 
-  const [scenes, setScenes] = useState<string[]>([]);
+  const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [scenes, setScenes] = useState<string[]>([]); // canonical story + turn clock
   const [currentScene, setCurrentScene] = useState("");
   const [options, setOptions] = useState<string[]>([]);
   const [summary, setSummary] = useState(premise);
+  const [notes, setNotes] = useState("");
+  const [discussion, setDiscussion] = useState<DiscussionEntry[]>([]);
+  const [currentReply, setCurrentReply] = useState("");
+  const [replyCount, setReplyCount] = useState(0); // keys StreamingText per reply
   const [pendingTurn, setPendingTurn] = useState<TurnRequest | null>(null);
+  const [stopped, setStopped] = useState(false);
   const [error, setError] = useState<StreamError | null>(null);
   const [turnCount, setTurnCount] = useState(0);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [confirmPending, setConfirmPending] = useState<ConfirmPending | null>(
-    null
-  );
   const scrollRef = useRef<ScrollView>(null);
   const startedRef = useRef(false);
   const streamingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
-  const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function runTurn(req: TurnRequest) {
-    // Guard against overlapping turns
+    // Guard against overlapping turns (one busy flag shared with runConverse)
     if (streamingRef.current) return;
     streamingRef.current = true;
-    // A card tap or retry starting a fresh turn must discard any pending
-    // spoken-utterance confirm timer — otherwise it fires 1.5s later and
-    // double-spends a Gemini call via a second handleChoose.
-    cancelConfirm();
     setIsStreaming(true);
+    setStopped(false);
     const controller = new AbortController();
     abortRef.current = controller;
 
-    try {
-      setError(null);
-      setCurrentScene("");
-      setOptions([]);
-      setPendingTurn(req);
-      setTurnCount((n) => n + 1);
+    setError(null);
+    setCurrentScene("");
+    setOptions([]);
+    setPendingTurn(req);
+    setTurnCount((n) => n + 1);
+    // An offer is consumed by the next turn — drop any leftover cards.
+    setFeed((f) => f.filter((i) => i.kind !== "cards"));
 
-      let sceneText = "";
-      for await (const ev of streamTurn(req, { signal: controller.signal })) {
+    let sceneText = "";
+    let gotTurnComplete = false;
+    let gotError = false;
+
+    try {
+      for await (const ev of streamTurn(
+        { ...req, notes },
+        { signal: controller.signal }
+      )) {
         if (ev.type === "token") {
           sceneText += ev.t;
           setCurrentScene(sceneText);
         } else if (ev.type === "turn_complete") {
+          gotTurnComplete = true;
           setScenes((prev) => [...prev, sceneText]);
+          setFeed((f) => [
+            ...f,
+            { kind: "scene", text: sceneText },
+            { kind: "cards", options: ev.scenarios },
+          ]);
           setCurrentScene("");
           setSummary(ev.summary);
           setOptions(ev.scenarios);
           setPendingTurn(null);
         } else if (ev.type === "stream_error") {
+          gotError = true;
           setError({ status: ev.status, detail: ev.detail });
         }
+      }
+      // A deliberate stop (not an error, not a natural completion) leaves the
+      // scene mid-flight — surface a neutral resume affordance, not an error.
+      if (controller.signal.aborted && !gotTurnComplete && !gotError) {
+        setStopped(true);
       }
     } finally {
       streamingRef.current = false;
@@ -95,10 +124,101 @@ export default function Story() {
     }
   }
 
+  async function runConverse(utterance: string) {
+    if (streamingRef.current) return;
+    streamingRef.current = true;
+    setIsStreaming(true);
+    setStopped(false);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setFeed((f) => [...f, { kind: "user_bubble", text: utterance }]);
+    setDiscussion((d) =>
+      [...d, { role: "user" as const, text: utterance }].slice(-6)
+    );
+    setError(null);
+    setCurrentReply("");
+    setReplyCount((n) => n + 1);
+
+    let routed:
+      | { intent: "pick"; index: number }
+      | { intent: "steer" }
+      | { intent: "options"; scenarios: string[] }
+      | null = null;
+    let replyText = "";
+    let completed = false;
+
+    try {
+      for await (const ev of converse(
+        {
+          template_id: templateId,
+          utterance,
+          summary,
+          notes,
+          options,
+          discussion: [
+            ...discussion,
+            { role: "user" as const, text: utterance },
+          ].slice(-6),
+          turn: scenes.length + 1,
+          length: storyLength,
+        },
+        { signal: controller.signal }
+      )) {
+        if (ev.type === "reply_token") {
+          replyText += ev.t;
+          setCurrentReply(replyText);
+        } else if (ev.type === "discussion_complete") {
+          completed = true;
+          setNotes(ev.notes);
+          if (replyText.trim()) {
+            setFeed((f) => [...f, { kind: "ai_bubble", text: replyText }]);
+            setDiscussion((d) =>
+              [...d, { role: "ai" as const, text: replyText }].slice(-6)
+            );
+          }
+          setCurrentReply("");
+        } else if (ev.type === "route") {
+          routed = ev;
+        } else if (ev.type === "stream_error") {
+          setError({ status: ev.status, detail: ev.detail });
+        }
+      }
+    } finally {
+      // An aborted or failed reply keeps whatever streamed (you can't un-say
+      // it), but notes stay unchanged — canon only updates through
+      // discussion_complete.
+      if (!completed && replyText.trim()) {
+        setFeed((f) => [...f, { kind: "ai_bubble", text: replyText }]);
+        setDiscussion((d) =>
+          [...d, { role: "ai" as const, text: replyText }].slice(-6)
+        );
+        setCurrentReply("");
+      }
+      streamingRef.current = false;
+      setIsStreaming(false);
+      abortRef.current = null;
+    }
+
+    // Act on the route AFTER the loop + guard release, so it can safely kick
+    // off the next turn (which re-acquires the same guard).
+    if (routed) {
+      if (routed.intent === "pick") handleChoose(options[routed.index]);
+      else if (routed.intent === "steer") handleChoose(utterance);
+      else if (routed.intent === "options") {
+        const scenarios = routed.scenarios;
+        setOptions(scenarios);
+        setFeed((f) => [
+          ...f.filter((i) => i.kind !== "cards"),
+          { kind: "cards", options: scenarios },
+        ]);
+      }
+    }
+  }
+
   useEffect(() => {
     return () => {
       abortRef.current?.abort(); // stop billing a screen nobody is watching
-      if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
     };
   }, []);
 
@@ -129,33 +249,16 @@ export default function Story() {
     if (pendingTurn) runTurn(pendingTurn);
   };
 
-  // Push-to-talk: a spoken utterance either picks a card (matchCard finds an
-  // ordinal/overlap match) or steers the story free-form (no match). Either
-  // way it fires through handleChoose — the SAME path option-card taps use —
-  // after a 1.5s confirm window the speaker can cancel.
+  // Push-to-talk: an ordinal match ("the second one") picks a card straight
+  // away — no confirm window, no round trip. Anything else goes to /converse,
+  // where a model decides pick / steer / discuss / options with context.
   const handleUtterance = (utterance: string) => {
-    // Optional hardening: discard any prior pending confirm timer before
-    // arming a new one, so two utterances in quick succession can't both
-    // end up with a live timeout.
-    if (confirmTimeoutRef.current) {
-      clearTimeout(confirmTimeoutRef.current);
-      confirmTimeoutRef.current = null;
+    const idx = matchCard(utterance, options);
+    if (idx !== null) {
+      handleChoose(options[idx]);
+      return;
     }
-    const matchedIndex = matchCard(utterance, options);
-    setConfirmPending({ utterance, matchedIndex });
-    confirmTimeoutRef.current = setTimeout(() => {
-      confirmTimeoutRef.current = null;
-      setConfirmPending(null);
-      handleChoose(matchedIndex !== null ? options[matchedIndex] : utterance);
-    }, 1500);
-  };
-
-  const cancelConfirm = () => {
-    if (confirmTimeoutRef.current) {
-      clearTimeout(confirmTimeoutRef.current);
-      confirmTimeoutRef.current = null;
-    }
-    setConfirmPending(null);
+    runConverse(utterance);
   };
 
   return (
@@ -172,13 +275,51 @@ export default function Story() {
         contentContainerStyle={styles.content}
         onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
       >
-        {scenes.map((scene, idx) => (
-          <Text key={idx} style={styles.sceneText}>
-            {scene}
-          </Text>
-        ))}
+        {feed.map((item, idx) => {
+          if (item.kind === "scene") {
+            return (
+              <Text key={idx} style={styles.sceneText}>
+                {item.text}
+              </Text>
+            );
+          }
+          if (item.kind === "user_bubble") {
+            return (
+              <View key={idx} style={[styles.bubble, styles.userBubble]}>
+                <Text style={styles.bubbleText}>{item.text}</Text>
+              </View>
+            );
+          }
+          if (item.kind === "ai_bubble") {
+            return (
+              <View key={idx} style={[styles.bubble, styles.aiBubble]}>
+                <Text style={styles.bubbleText}>{item.text}</Text>
+              </View>
+            );
+          }
+          // item.kind === "cards"
+          return (
+            <View key={idx} style={styles.optionsSection}>
+              {item.options.map((option) => (
+                <Pressable
+                  key={option}
+                  onPress={() => handleChoose(option)}
+                  style={styles.card}
+                >
+                  <Text style={styles.cardTitle}>{option}</Text>
+                </Pressable>
+              ))}
+            </View>
+          );
+        })}
 
         {!error && <StreamingText key={turnCount} text={currentScene} />}
+
+        {!error && currentReply.length > 0 && (
+          <View style={[styles.bubble, styles.aiBubble]}>
+            <StreamingText key={`reply-${replyCount}`} text={currentReply} />
+          </View>
+        )}
 
         {error && (
           <View style={styles.errorBox}>
@@ -191,42 +332,26 @@ export default function Story() {
           </View>
         )}
 
-        {!error && options.length > 0 && (
-          <View style={styles.optionsSection}>
-            {options.map((option, idx) => (
-              <Pressable
-                key={option}
-                onPress={() => handleChoose(option)}
-                style={[
-                  styles.card,
-                  confirmPending?.matchedIndex === idx && styles.cardHighlighted,
-                ]}
-              >
-                <Text style={styles.cardTitle}>{option}</Text>
-              </Pressable>
-            ))}
-          </View>
+        {!error && stopped && pendingTurn && (
+          <Pressable onPress={handleRetry} style={styles.stopped}>
+            <Text style={styles.stoppedText}>
+              Stopped — tap to continue the scene
+            </Text>
+          </Pressable>
         )}
       </ScrollView>
 
       <View style={styles.pttArea}>
-        {confirmPending && (
-          <View style={styles.confirmBar}>
-            <Text style={styles.confirmText}>
-              Heard: "{confirmPending.utterance}" →{" "}
-              {confirmPending.matchedIndex !== null
-                ? `choosing option ${confirmPending.matchedIndex + 1}`
-                : "steering the story"}
-            </Text>
-            <Pressable onPress={cancelConfirm} style={styles.cancelButton}>
-              <Text style={styles.cancelButtonText}>Cancel</Text>
-            </Pressable>
-          </View>
+        {isStreaming && (
+          <Pressable
+            testID="stop-button"
+            onPress={() => abortRef.current?.abort()}
+            style={styles.stopButton}
+          >
+            <Text style={styles.stopButtonText}>■ Stop</Text>
+          </Pressable>
         )}
-        <PushToTalk
-          disabled={isStreaming || confirmPending !== null}
-          onUtterance={handleUtterance}
-        />
+        <PushToTalk disabled={isStreaming} onUtterance={handleUtterance} />
       </View>
     </View>
   );
@@ -266,6 +391,31 @@ const styles = StyleSheet.create({
     color: "#f2f2f2",
     marginBottom: 14,
   },
+  bubble: {
+    maxWidth: "85%",
+    padding: 14,
+    borderRadius: 14,
+    marginBottom: 12,
+  },
+  userBubble: {
+    alignSelf: "flex-end",
+    backgroundColor: "#1a2333",
+    borderWidth: 1,
+    borderColor: "#2e3a50",
+    borderBottomRightRadius: 4,
+  },
+  aiBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: "#1e1e1e",
+    borderWidth: 1,
+    borderColor: "#2e2e2e",
+    borderBottomLeftRadius: 4,
+  },
+  bubbleText: {
+    color: "#f2f2f2",
+    fontSize: 15,
+    lineHeight: 22,
+  },
   errorBox: {
     marginTop: 8,
   },
@@ -280,6 +430,18 @@ const styles = StyleSheet.create({
     color: "#e08080",
     fontSize: 15,
   },
+  stopped: {
+    padding: 16,
+    borderRadius: 8,
+    backgroundColor: "#1e1e1e",
+    borderWidth: 1,
+    borderColor: "#3a3f4f",
+    marginTop: 8,
+  },
+  stoppedText: {
+    color: "#a0a8c0",
+    fontSize: 15,
+  },
   optionsSection: {
     marginTop: 12,
   },
@@ -290,10 +452,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#2e2e2e",
     marginBottom: 12,
-  },
-  cardHighlighted: {
-    borderColor: "#7aa2f7",
-    backgroundColor: "#1a2333",
   },
   cardTitle: {
     fontSize: 16,
@@ -308,33 +466,18 @@ const styles = StyleSheet.create({
     paddingBottom: 16,
     backgroundColor: "#121212",
   },
-  confirmBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: 12,
-    borderRadius: 8,
+  stopButton: {
+    alignSelf: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 18,
+    borderRadius: 16,
     backgroundColor: "#1e1e1e",
     borderWidth: 1,
     borderColor: "#3a3f4f",
-    marginBottom: 8,
-    gap: 12,
+    marginBottom: 10,
   },
-  confirmText: {
-    flex: 1,
-    color: "#f2f2f2",
-    fontSize: 14,
-  },
-  cancelButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: "#2a1414",
-    borderWidth: 1,
-    borderColor: "#5a2a2a",
-  },
-  cancelButtonText: {
-    color: "#e08080",
+  stopButtonText: {
+    color: "#c0c4d0",
     fontSize: 13,
     fontWeight: "bold",
   },
