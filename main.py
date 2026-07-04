@@ -22,13 +22,13 @@ import time
 from collections.abc import Iterator
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 
 import usage_log
 import story_templates
@@ -609,7 +609,7 @@ def sse_event(event: str, data: dict) -> str:
 
 
 def call_gemini(
-    contents: str, max_tokens: int, temperature: float, label: str = "unlabeled"
+    contents: str | list, max_tokens: int, temperature: float, label: str = "unlabeled"
 ) -> str:
     """
     Make ONE Gemini request, retrying transient server errors (5xx) with
@@ -792,6 +792,41 @@ def expand(req: ExpandRequest):
         label="expand",
     )
     return {"original": req.scenario, "expanded": expanded}
+
+
+# --- Audio slice: the ears -------------------------------------------------
+# Audio input bills as ordinary input tokens (~30/sec of speech), so the
+# existing token meter captures STT cost with no schema change.
+TRANSCRIBE_PROMPT = """Transcribe this audio recording verbatim.
+Output ONLY the words that were spoken — no punctuation editorializing beyond
+normal sentence punctuation, no commentary, no labels, no quotes. If the
+audio contains no discernible speech, output nothing."""
+
+STT_BUDGET = 200  # a push-to-talk utterance is a sentence or two
+MAX_AUDIO_BYTES = 2_000_000  # ~2MB; a PTT clip is seconds, not minutes
+
+
+@app.post("/transcribe")
+async def transcribe(audio: UploadFile = File(...)):
+    """Speech-to-text for push-to-talk: one short clip in, its words out."""
+    data = await audio.read()
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Audio clip too large. Push-to-talk clips are seconds long.",
+        )
+    text = call_gemini(
+        [
+            TRANSCRIBE_PROMPT,
+            types.Part.from_bytes(
+                data=data, mime_type=audio.content_type or "audio/webm"
+            ),
+        ],
+        max_tokens=STT_BUDGET,
+        temperature=0.0,  # transcription is mechanical: no creativity wanted
+        label="stt",
+    )
+    return {"transcript": text.strip()}
 
 
 @app.post("/continue")
