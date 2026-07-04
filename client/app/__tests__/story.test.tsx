@@ -26,6 +26,30 @@ jest.mock("../../lib/voice", () => ({
   getVoiceIn: () => mockVoiceFake,
 }));
 
+// --- voiceOut fake: capture narration calls (mock-prefixed for the same
+// hoisting reason as mockVoiceFake above). ---
+const mockVoiceOutFake = {
+  available: true,
+  speak: jest.fn(),
+  stop: jest.fn(),
+  onSpeakingChange: jest.fn(),
+};
+jest.mock("../../lib/voiceOut", () => ({
+  getVoiceOut: () => mockVoiceOutFake,
+}));
+
+beforeEach(() => {
+  mockVoiceOutFake.speak.mockClear();
+  mockVoiceOutFake.stop.mockClear();
+  // Also cleared (beyond the brief's two lines): onSpeakingChange is a plain
+  // jest.fn(), so its call history otherwise accumulates across tests in this
+  // file (restoreMocks only restores jest.spyOn spies) — an uncleared history
+  // makes `mock.calls[0][0]` in the "isSpeaking" test grab a stale callback
+  // from an earlier, already-unmounted Story instance instead of the current
+  // render's.
+  mockVoiceOutFake.onSpeakingChange.mockClear();
+});
+
 async function* fixtureStream(events: StreamEvent[]) {
   for (const ev of events) yield ev;
 }
@@ -603,6 +627,78 @@ describe("push-to-talk", () => {
     const { getByText } = render(<Story />);
     await waitFor(() => getByText(/Force the iron door/));
     expect(getByText(/home/i)).toBeTruthy();
+  });
+});
+
+describe("narration", () => {
+  it("speaks the scene when the turn completes", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+    expect(mockVoiceOutFake.speak).toHaveBeenCalledWith(
+      "Scene. ",
+      expect.objectContaining({ kind: "scene" })
+    );
+  });
+
+  it("speaks the reply when a discussion completes", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    jest.spyOn(api, "converse").mockReturnValueOnce(
+      fixtureStream([
+        { type: "reply_token", t: "She is stubborn." },
+        { type: "discussion_complete", notes: "n" },
+      ])
+    );
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("tell me about her"));
+
+    await waitFor(() => getByText(/She is stubborn./));
+    expect(mockVoiceOutFake.speak).toHaveBeenCalledWith(
+      "She is stubborn.",
+      expect.objectContaining({ kind: "reply" })
+    );
+  });
+
+  it("the stop control silences narration too", async () => {
+    let release: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    jest.spyOn(api, "streamTurn").mockReturnValue(
+      (async function* () {
+        yield { type: "token", t: "Slow " } as const;
+        await gate;
+      })() as never
+    );
+    const { getByTestId, getByText } = render(<Story />);
+    await waitFor(() => getByText(/Slow/));
+    fireEvent.press(getByTestId("stop-button"));
+    expect(mockVoiceOutFake.stop).toHaveBeenCalled();
+    await act(async () => release!());
+  });
+
+  it("holding the mic interrupts narration", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    expect(mockVoiceOutFake.stop).toHaveBeenCalled();
+  });
+
+  it("speaking never disables the mic (isSpeaking is not isStreaming)", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+    // Simulate narration in progress via the subscribed callback:
+    const subscribed = mockVoiceOutFake.onSpeakingChange.mock.calls[0][0];
+    act(() => subscribed(true));
+    expect(
+      getByTestId("ptt-button").props.accessibilityState?.disabled
+    ).toBe(false);
+    expect(getByTestId("stop-button")).toBeTruthy(); // silence control available
   });
 });
 

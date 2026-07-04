@@ -11,6 +11,7 @@ import {
 import { StreamingText } from "../components/StreamingText";
 import { PushToTalk } from "../components/PushToTalk";
 import { matchCard } from "../lib/matchCard";
+import { getVoiceOut, VoiceOut } from "../lib/voiceOut";
 
 type FeedItem =
   | { kind: "scene"; text: string }
@@ -62,10 +63,20 @@ export default function Story() {
   const [error, setError] = useState<StreamError | null>(null);
   const [turnCount, setTurnCount] = useState(0);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const startedRef = useRef(false);
   const streamingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const voiceOutRef = useRef<VoiceOut | null>(null);
+  if (voiceOutRef.current === null) {
+    voiceOutRef.current = getVoiceOut();
+  }
+  const voiceOut = voiceOutRef.current;
+
+  useEffect(() => {
+    voiceOut.onSpeakingChange(setIsSpeaking);
+  }, [voiceOut]);
 
   async function runTurn(req: TurnRequest) {
     // Guard against overlapping turns (one busy flag shared with runConverse)
@@ -109,6 +120,7 @@ export default function Story() {
           setSummary(ev.summary);
           setOptions(ev.scenarios);
           setPendingTurn(null);
+          voiceOut.speak(sceneText, { kind: "scene" });
         } else if (ev.type === "stream_error") {
           gotError = true;
           setError({ status: ev.status, detail: ev.detail });
@@ -182,6 +194,7 @@ export default function Story() {
             setDiscussion((d) =>
               [...d, { role: "ai" as const, text: replyText }].slice(-6)
             );
+            voiceOut.speak(replyText, { kind: "reply" });
           }
           setCurrentReply("");
         } else if (ev.type === "route") {
@@ -228,7 +241,9 @@ export default function Story() {
   useEffect(() => {
     return () => {
       abortRef.current?.abort(); // stop billing a screen nobody is watching
+      voiceOut.stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -352,16 +367,23 @@ export default function Story() {
       </ScrollView>
 
       <View style={styles.pttArea}>
-        {isStreaming && (
+        {(isStreaming || isSpeaking) && (
           <Pressable
             testID="stop-button"
-            onPress={() => abortRef.current?.abort()}
+            onPress={() => {
+              abortRef.current?.abort();
+              voiceOut.stop();
+            }}
             style={styles.stopButton}
           >
             <Text style={styles.stopButtonText}>■ Stop</Text>
           </Pressable>
         )}
-        <PushToTalk disabled={isStreaming} onUtterance={handleUtterance} />
+        <PushToTalk
+          onActivate={() => voiceOut.stop()}
+          disabled={isStreaming}
+          onUtterance={handleUtterance}
+        />
       </View>
     </View>
   );

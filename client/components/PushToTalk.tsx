@@ -11,6 +11,9 @@ type PushToTalkProps = {
   /** Compact rendering (icon-only button) for embedding beside the premise
    * input on Home, vs. the full "Hold to talk" bar on the Story screen. */
   compact?: boolean;
+  /** Called first thing in handlePressIn — lets a caller interrupt anything
+   * running (e.g. Story silences narration the instant you start talking). */
+  onActivate?: () => void;
 };
 
 /**
@@ -26,6 +29,7 @@ export function PushToTalk({
   onUtterance,
   testID = "ptt-button",
   compact = false,
+  onActivate,
 }: PushToTalkProps) {
   const voiceRef = useRef<VoiceIn | null>(null);
   if (voiceRef.current === null) {
@@ -54,6 +58,7 @@ export function PushToTalk({
   if (!voice.available) return null;
 
   const handlePressIn = () => {
+    onActivate?.();
     setError(null);
     setPhase("listening");
     voice.start({
