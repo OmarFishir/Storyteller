@@ -178,4 +178,72 @@ describe("getVoiceIn (web v2: record -> upload -> transcribe)", () => {
     expect(fetchSpy).not.toHaveBeenCalled(); // first session discarded silently
     expect(FakeMediaRecorder.instances[1].state).toBe("recording");
   });
+
+  it("abort() during the in-flight upload suppresses the stale onFinal", async () => {
+    installMediaGlobals();
+    let resolveFetch: (v: unknown) => void;
+    jest
+      .spyOn(require("../fetch"), "streamingFetch")
+      .mockReturnValue(new Promise((r) => (resolveFetch = r)) as never);
+
+    const voice = getVoiceIn();
+    const c = cb();
+    voice.start(c);
+    await flush();
+    voice.stop(); // upload committed, still in flight
+    await flush();
+    voice.abort(); // e.g. unmount cleanup during "transcribing"
+    resolveFetch!({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ transcript: "stale words" }),
+    });
+    await flush();
+    await flush();
+    expect(c.finals).toEqual([]); // discarded: no delivery
+    expect(c.errors).toEqual([]);
+  });
+
+  it("a second start() during the in-flight upload suppresses the old session's delivery", async () => {
+    installMediaGlobals();
+    let resolveFetch: (v: unknown) => void;
+    const fetchSpy = jest
+      .spyOn(require("../fetch"), "streamingFetch")
+      .mockReturnValueOnce(new Promise((r) => (resolveFetch = r)) as never);
+
+    const voice = getVoiceIn();
+    const c1 = cb();
+    voice.start(c1);
+    await flush();
+    voice.stop();
+    await flush(); // c1's upload in flight
+    const c2 = cb();
+    voice.start(c2); // fast re-press supersedes
+    await flush();
+    resolveFetch!({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ transcript: "stale words" }),
+    });
+    await flush();
+    await flush();
+    expect(c1.finals).toEqual([]); // superseded session stays silent
+    expect(c1.errors).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // and the new session is unaffected
+    expect(FakeMediaRecorder.instances[1].state).toBe("recording");
+  });
+
+  it("permission denial after an abort delivers nothing", async () => {
+    let rejectPerm: (e: unknown) => void;
+    installMediaGlobals(
+      jest.fn(() => new Promise((_r, rej) => (rejectPerm = rej)) as never)
+    );
+    const voice = getVoiceIn();
+    const c = cb();
+    voice.start(c);
+    voice.abort(); // aborted while the permission prompt is open
+    rejectPerm!(new Error("denied"));
+    await flush();
+    expect(c.errors).toEqual([]);
+  });
 });

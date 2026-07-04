@@ -93,6 +93,7 @@ export function getVoiceIn(): VoiceIn {
     form.append("audio", blob, "utterance.webm");
     streamingFetch(`${API_URL}/transcribe`, { method: "POST", body: form })
       .then(async (res) => {
+        if (s.discarded) return; // superseded/aborted while the upload was in flight
         if (!res.ok) {
           let detail = `Transcription failed (${res.status})`;
           try {
@@ -105,6 +106,7 @@ export function getVoiceIn(): VoiceIn {
         if (transcript) cb.onFinal(transcript);
       })
       .catch(() => {
+        if (s.discarded) return; // superseded/aborted while the upload was in flight
         cb.onError("Couldn't reach the storyteller to transcribe. Is the backend running?");
       });
   };
@@ -151,9 +153,11 @@ export function getVoiceIn(): VoiceIn {
           if (s.stopRequested) recorder.stop();
         })
         .catch(() => {
-          cb.onError(
-            "Microphone permission denied. Enable the mic to speak your story."
-          );
+          if (!s.discarded) {
+            cb.onError(
+              "Microphone permission denied. Enable the mic to speak your story."
+            );
+          }
         });
     },
     stop() {
