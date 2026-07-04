@@ -57,6 +57,7 @@ export default function Story() {
   const [currentReply, setCurrentReply] = useState("");
   const [replyCount, setReplyCount] = useState(0); // keys StreamingText per reply
   const [pendingTurn, setPendingTurn] = useState<TurnRequest | null>(null);
+  const [pendingConverse, setPendingConverse] = useState<string | null>(null);
   const [stopped, setStopped] = useState(false);
   const [error, setError] = useState<StreamError | null>(null);
   const [turnCount, setTurnCount] = useState(0);
@@ -72,6 +73,7 @@ export default function Story() {
     streamingRef.current = true;
     setIsStreaming(true);
     setStopped(false);
+    setPendingConverse(null); // choosing a card or retrying a scene abandons a failed conversation
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -124,18 +126,21 @@ export default function Story() {
     }
   }
 
-  async function runConverse(utterance: string) {
+  async function runConverse(utterance: string, isRetry = false) {
     if (streamingRef.current) return;
     streamingRef.current = true;
     setIsStreaming(true);
     setStopped(false);
+    setPendingConverse(null);
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setFeed((f) => [...f, { kind: "user_bubble", text: utterance }]);
-    setDiscussion((d) =>
-      [...d, { role: "user" as const, text: utterance }].slice(-6)
-    );
+    if (!isRetry) {
+      setFeed((f) => [...f, { kind: "user_bubble", text: utterance }]);
+      setDiscussion((d) =>
+        [...d, { role: "user" as const, text: utterance }].slice(-6)
+      );
+    }
     setError(null);
     setCurrentReply("");
     setReplyCount((n) => n + 1);
@@ -156,10 +161,11 @@ export default function Story() {
           summary,
           notes,
           options,
-          discussion: [
-            ...discussion,
-            { role: "user" as const, text: utterance },
-          ].slice(-6),
+          discussion: isRetry
+            ? [...discussion].slice(-6)
+            : [...discussion, { role: "user" as const, text: utterance }].slice(
+                -6
+              ),
           turn: scenes.length + 1,
           length: storyLength,
         },
@@ -182,6 +188,7 @@ export default function Story() {
           routed = ev;
         } else if (ev.type === "stream_error") {
           setError({ status: ev.status, detail: ev.detail });
+          setPendingConverse(utterance);
         }
       }
     } finally {
@@ -246,7 +253,8 @@ export default function Story() {
   };
 
   const handleRetry = () => {
-    if (pendingTurn) runTurn(pendingTurn);
+    if (pendingConverse) runConverse(pendingConverse, true);
+    else if (pendingTurn) runTurn(pendingTurn);
   };
 
   // Push-to-talk: an ordinal match ("the second one") picks a card straight

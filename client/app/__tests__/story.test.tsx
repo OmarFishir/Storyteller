@@ -470,6 +470,48 @@ describe("push-to-talk", () => {
     expect(getByText(/Partial thought/)).toBeTruthy(); // partial bubble kept
   });
 
+  it("retry after a converse failure re-runs the conversation, not a turn", async () => {
+    const turnSpy = jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    const converseSpy = jest
+      .spyOn(api, "converse")
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "reply_token", t: "Half a " },
+          { type: "stream_error", status: 503, detail: "model went away" },
+        ])
+      )
+      .mockReturnValueOnce(
+        fixtureStream([
+          { type: "reply_token", t: "She is stubborn." },
+          { type: "discussion_complete", notes: "Mira is stubborn." },
+        ])
+      );
+
+    const { getByText, getByTestId, getAllByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("tell me about the voice"));
+
+    await waitFor(() => getByText(/tap to retry/i));
+    fireEvent.press(getByText(/tap to retry/i));
+
+    await waitFor(() => getByText(/She is stubborn./));
+    expect(converseSpy).toHaveBeenCalledTimes(2);
+    expect(converseSpy.mock.calls[1][0]).toEqual(
+      expect.objectContaining({ utterance: "tell me about the voice" })
+    );
+    // The retry must not duplicate the optimistic user entry:
+    expect(getAllByText(/tell me about the voice/)).toHaveLength(1);
+    const retryDiscussion = (converseSpy.mock.calls[1][0] as { discussion: { role: string; text: string }[] }).discussion;
+    expect(
+      retryDiscussion.filter((d) => d.text === "tell me about the voice")
+    ).toHaveLength(1);
+    expect(turnSpy).toHaveBeenCalledTimes(1); // opening turn only — retry never ran a turn
+  });
+
   it("consumed cards disappear when the next turn starts", async () => {
     jest
       .spyOn(api, "streamTurn")
