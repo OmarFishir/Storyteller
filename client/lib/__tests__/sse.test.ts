@@ -58,3 +58,39 @@ describe("SSEParser", () => {
     ]);
   });
 });
+
+describe("converse frames", () => {
+  it("parses reply_token", () => {
+    const p = new SSEParser();
+    expect(p.feed('event: reply_token\ndata: {"t": "She is "}\n\n')).toEqual([
+      { type: "reply_token", t: "She is " },
+    ]);
+  });
+
+  it("parses discussion_complete", () => {
+    const p = new SSEParser();
+    expect(
+      p.feed('event: discussion_complete\ndata: {"notes": "Mira is stubborn."}\n\n')
+    ).toEqual([{ type: "discussion_complete", notes: "Mira is stubborn." }]);
+  });
+
+  it("parses the three route intents", () => {
+    const p = new SSEParser();
+    expect(
+      p.feed('event: route\ndata: {"intent": "pick", "index": 1}\n\n')
+    ).toEqual([{ type: "route", intent: "pick", index: 1 }]);
+    expect(p.feed('event: route\ndata: {"intent": "steer"}\n\n')).toEqual([
+      { type: "route", intent: "steer" },
+    ]);
+    expect(
+      p.feed('event: route\ndata: {"intent": "options", "scenarios": ["A", "B"]}\n\n')
+    ).toEqual([{ type: "route", intent: "options", scenarios: ["A", "B"] }]);
+  });
+
+  it("unknown route intent becomes a stream_error, not a silent ignore", () => {
+    const p = new SSEParser();
+    expect(p.feed('event: route\ndata: {"intent": "dance"}\n\n')).toEqual([
+      { type: "stream_error", status: 500, detail: "Malformed stream frame." },
+    ]);
+  });
+});

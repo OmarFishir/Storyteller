@@ -1,6 +1,11 @@
 export type StreamEvent =
   | { type: "token"; t: string }
   | { type: "turn_complete"; summary: string; scenarios: string[] }
+  | { type: "reply_token"; t: string }
+  | { type: "discussion_complete"; notes: string }
+  | { type: "route"; intent: "pick"; index: number }
+  | { type: "route"; intent: "steer" }
+  | { type: "route"; intent: "options"; scenarios: string[] }
   | { type: "stream_error"; status: number; detail: string };
 
 /**
@@ -48,6 +53,25 @@ function parseBlock(block: string): StreamEvent | null {
         status: Number(payload.status ?? 500),
         detail: String(payload.detail ?? "Something went wrong."),
       };
+    if (event === "reply_token")
+      return { type: "reply_token", t: String(payload.t ?? "") };
+    if (event === "discussion_complete")
+      return { type: "discussion_complete", notes: String(payload.notes ?? "") };
+    if (event === "route") {
+      if (payload.intent === "pick")
+        return { type: "route", intent: "pick", index: Number(payload.index ?? -1) };
+      if (payload.intent === "steer") return { type: "route", intent: "steer" };
+      if (payload.intent === "options")
+        return {
+          type: "route",
+          intent: "options",
+          scenarios: Array.isArray(payload.scenarios)
+            ? payload.scenarios.map(String)
+            : [],
+        };
+      // A route frame we can't act on is a broken contract, not forward-compat.
+      return { type: "stream_error", status: 500, detail: "Malformed stream frame." };
+    }
   } catch {
     return { type: "stream_error", status: 500, detail: "Malformed stream frame." };
   }

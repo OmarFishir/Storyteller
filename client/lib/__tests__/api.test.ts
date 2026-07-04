@@ -1,4 +1,4 @@
-import { streamTurn } from "../api";
+import { streamTurn, converse } from "../api";
 
 function streamResponseFromString(body: string, status = 200): Response {
   const stream = new ReadableStream({
@@ -141,5 +141,80 @@ describe("streamTurn", () => {
     await gen.return(undefined as never); // consumer walks away
     expect(cancel).toHaveBeenCalled();
     expect(spy.mock.calls[0][1]).toMatchObject({ signal: controller.signal });
+  });
+});
+
+describe("converse", () => {
+  const CONVERSE_REQ = {
+    template_id: "fantasy",
+    utterance: "tell me more",
+    summary: "s",
+    notes: "",
+    options: ["A", "B", "C"],
+    discussion: [],
+    turn: 2,
+    length: "short" as const,
+  };
+
+  it("POSTs to /converse/stream and yields parsed frames", async () => {
+    const body =
+      'event: reply_token\ndata: {"t": "Hi."}\n\n' +
+      'event: discussion_complete\ndata: {"notes": "n1"}\n\n';
+    const fakeRes = {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => {
+          let done = false;
+          return {
+            read: () => {
+              if (done) return Promise.resolve({ done: true, value: undefined });
+              done = true;
+              return Promise.resolve({
+                done: false,
+                value: new TextEncoder().encode(body),
+              });
+            },
+            cancel: jest.fn(() => Promise.resolve()),
+          };
+        },
+      },
+    } as unknown as Response;
+    const spy = jest
+      .spyOn(require("../fetch"), "streamingFetch")
+      .mockResolvedValue(fakeRes);
+
+    const events = [];
+    for await (const ev of converse(CONVERSE_REQ)) events.push(ev);
+    expect(events).toEqual([
+      { type: "reply_token", t: "Hi." },
+      { type: "discussion_complete", notes: "n1" },
+    ]);
+    expect(String(spy.mock.calls[0][0])).toContain("/converse/stream");
+    expect(JSON.parse((spy.mock.calls[0][1] as any).body as string)).toEqual(CONVERSE_REQ);
+  });
+
+  it("shares streamTurn's single error channel (network failure -> status 0)", async () => {
+    jest
+      .spyOn(require("../fetch"), "streamingFetch")
+      .mockRejectedValue(new Error("ECONNREFUSED"));
+    const events = [];
+    for await (const ev of converse(CONVERSE_REQ)) events.push(ev);
+    expect(events).toEqual([
+      {
+        type: "stream_error",
+        status: 0,
+        detail: "Can't reach the storyteller. Is the backend running?",
+      },
+    ]);
+  });
+
+  it("ends silently on a deliberate abort", async () => {
+    const abortErr = new Error("Aborted");
+    abortErr.name = "AbortError";
+    jest.spyOn(require("../fetch"), "streamingFetch").mockRejectedValue(abortErr);
+    const events = [];
+    for await (const ev of converse(CONVERSE_REQ)) events.push(ev);
+    expect(events).toEqual([]);
   });
 });

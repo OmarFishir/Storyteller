@@ -14,6 +14,18 @@ export type TurnRequest = {
   chosen_scenario: string;
   turn: number;
   length: StoryLength;
+  notes?: string;
+};
+export type DiscussionEntry = { role: "user" | "ai"; text: string };
+export type ConverseRequest = {
+  template_id: string;
+  utterance: string;
+  summary: string;
+  notes: string;
+  options: string[];
+  discussion: DiscussionEntry[];
+  turn: number;
+  length: StoryLength;
 };
 
 export const API_URL =
@@ -28,16 +40,16 @@ export async function getTemplates(): Promise<Template[]> {
 }
 
 /**
- * Run one story turn against POST /continue/stream, yielding StreamEvents.
- * Error policy (per spec): once streaming starts, errors arrive as frames
- * over HTTP 200. Plain HTTP errors (404/403/422 before the stream) are
- * mapped into the SAME stream_error channel so the UI has ONE error path.
+ * Shared SSE POST driver. Error policy (per spec): once streaming starts,
+ * errors arrive as frames over HTTP 200. Plain HTTP errors (404/403/422
+ * before the stream) are mapped into the SAME stream_error channel so the UI
+ * has ONE error path.
  */
-export async function* streamTurn(
-  body: TurnRequest,
+async function* streamPost(
+  url: string,
+  body: unknown,
   opts?: { signal?: AbortSignal }
 ): AsyncGenerator<StreamEvent> {
-  const url = `${API_URL}/continue/stream${USE_MOCK ? "?mock=true" : ""}`;
   let res: Response;
   try {
     res = await streamingFetch(url, {
@@ -94,4 +106,28 @@ export async function* streamTurn(
       reader?.cancel()?.catch?.(() => {});
     } catch {}
   }
+}
+
+/** Run one story turn against POST /continue/stream, yielding StreamEvents. */
+export function streamTurn(
+  body: TurnRequest,
+  opts?: { signal?: AbortSignal }
+): AsyncGenerator<StreamEvent> {
+  return streamPost(
+    `${API_URL}/continue/stream${USE_MOCK ? "?mock=true" : ""}`,
+    body,
+    opts
+  );
+}
+
+/** Run one discussion turn against POST /converse/stream, yielding StreamEvents. */
+export function converse(
+  body: ConverseRequest,
+  opts?: { signal?: AbortSignal }
+): AsyncGenerator<StreamEvent> {
+  return streamPost(
+    `${API_URL}/converse/stream${USE_MOCK ? "?mock=true" : ""}`,
+    body,
+    opts
+  );
 }
