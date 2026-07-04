@@ -146,6 +146,33 @@ FastAPI server in `main.py`:
   `max_output_tokens=600`, `temperature=0.8`. Returns prose directly (NO JSON
   parsing — simpler than /suggest). Echoes `original` from the request rather than
   paying the model to reproduce it.
+- `POST /transcribe` — the audio slice's EARS. Multipart `audio` file in →
+  `{"transcript": "..."}` out. ONE Gemini call on the shared `MODEL` constant
+  (`[TRANSCRIBE_PROMPT, Part.from_bytes(data, mime_type=audio.content_type or
+  "audio/webm")]` — static prompt first, the caching-order convention;
+  `STT_BUDGET=200`, `temperature=0.0` since transcription is mechanical, zero
+  creativity wanted), label `stt`. `MAX_AUDIO_BYTES=2_000_000` (~2MB) rejects
+  an oversized clip with a 413 BEFORE any model call — a push-to-talk clip is
+  seconds long, never that big. Audio input bills as ordinary input tokens
+  (~30/sec of speech), so the existing token meter captures STT cost with
+  zero schema change. Reuses `call_gemini` end to end, so its whole
+  retry/429/empty-response contract applies unchanged. New dep:
+  `python-multipart` (FastAPI needs it to parse multipart/form-data).
+- `POST /narrate` — the audio slice's MOUTH. `{"text": "...", "kind": "scene"
+  | "reply"}` → raw `audio/wav` bytes. `call_gemini_tts` calls Gemini's TTS
+  path on its own `TTS_MODEL = "gemini-2.5-flash-preview-tts"` constant
+  (swap-in-one-place, same philosophy as `MODEL`) with `VOICE_NAME = "charon"`
+  (v1: one narrator voice; per-genre voices are Phase 4) and
+  `TTS_BUDGET=4000` audio tokens (~2.5 min of speech), label `tts`. Mirrors
+  `call_gemini`'s error contract (retry 5xx w/ backoff, clean 429, an
+  empty/missing audio part → 502) — a third copy of the retry block;
+  extraction to a shared helper is queued for the Phase 3 `main.py` split,
+  consistency wins until then. `pcm_to_wav` (stdlib `wave`, no new dep) wraps
+  the model's raw 16-bit PCM in a WAV container at 24kHz mono — browsers
+  can't play bare PCM. `NARRATE_CHAR_CAP=6000` → 413 before any model call
+  (scenes are already budget-bounded; this is abuse armor for arbitrary
+  text). `kind` is accepted but not yet used to vary voice/style — a future
+  hook.
 - `POST /continue` — `{"template_id": "...", "summary": "...", "chosen_scenario": "...",
   "turn": 1, "length": "short", "notes": ""}` → `{"scene": "...", "summary": "...", "scenarios": [...]}`.
   The running-summary turn — the first cost-control piece actually wired up: the
@@ -263,7 +290,7 @@ FastAPI server in `main.py`:
   strings live in the `DETAIL_MODEL_BUSY` / `DETAIL_QUOTA` constants.
 - `usage_log.log_usage(label, model, input_tokens, output_tokens)` — appends one
   JSON line per Gemini call to `logs/usage.jsonl` (git-ignored). Labels in use:
-  `suggest`, `expand`, `scene`, `fold`, `converse`, `notes_fold`. A logging failure is swallowed (it must
+  `suggest`, `expand`, `scene`, `fold`, `converse`, `notes_fold`, `stt`, `tts`. A logging failure is swallowed (it must
   never break the request it's measuring) but warns on stderr so a dead meter is
   visible. The whole "dashboard" for now is opening the file.
 
@@ -277,10 +304,9 @@ reading/export view arrives with persistence in Phase 3. Full design:
 `docs/superpowers/specs/2026-07-03-story-structure-design.md`.
 
 Tests in `tests/test_api.py`, `tests/test_templates.py`, `tests/test_beats.py`,
-and `tests/test_converse.py`
-(pytest + FastAPI `TestClient`, **103 tests** — up from 69; the delta is
-`test_converse.py`'s new suite plus 3 notes-aware additions to
-`test_api.py`): health
+`tests/test_converse.py`, and `tests/test_audio.py`
+(pytest + FastAPI `TestClient`, **115 tests** — up from 103; the delta is
+`test_audio.py`'s new 12-test suite): health
 check; retry-then-succeed
 and retry-exhaustion → 503; 429-without-retry and other-4xx passthrough;
 empty-response → 502; /suggest shape bare and with `template_id` (404 on
@@ -330,7 +356,19 @@ intent line and notes-scribe garbage both becoming 502 error frames, a
 mid-stream failure keeping already-sent tokens, and 404/422 before streaming
 starts; plus mock mode (env-gate 403 when unset, the canned discuss reply +
 canned notes, and the "idea"/"option" → options and "she/he/they " → steer
-utterance triggers). Tests MOCK the Gemini layer — enforced
+utterance triggers). `tests/test_audio.py` covers the whole audio slice
+(parse-helpers/`TestClient` duplicated from `test_api.py` on purpose — tests
+aren't a package, consolidation rides with the Phase 3 split): `/transcribe`'s
+stripped-transcript happy path with contents ORDER pinned (static prompt
+first) and its `stt`/`STT_BUDGET`/`temperature=0.0` call args, the client's
+`content_type` passed through as the audio part's mime type, `MAX_AUDIO_BYTES`
+413 firing before any model call, a missing multipart file's 422, and Gemini
+errors mapping through unchanged; `/narrate`'s WAV response + `tts`
+usage-log row, `pcm_to_wav` producing a valid RIFF container, the
+`NARRATE_CHAR_CAP` 413, a missing `text` field's 422; and `call_gemini_tts`'s
+PCM extraction + usage logging, its 502 when no audio part comes back, and
+its clean 429 mapping — the same contract as `call_gemini`. Tests MOCK the
+Gemini layer — enforced
 structurally: `tests/conftest.py` sets a dummy `GEMINI_API_KEY` (suite runs on
 a clean clone, no `.env` needed) and an autouse tripwire makes any un-mocked
 Gemini call fail loudly. Run: `venv\Scripts\python.exe -m pytest tests/ -v`.
@@ -369,8 +407,23 @@ through the epilogue) still can't be verified on the free tier — a short noir
 arc alone is 24 Gemini calls — and remains blocked pending a paid tier, per
 the design spec.
 
+Live-verified the audio slice (2026-07-04, in-process `TestClient` vs real
+Gemini): `/narrate` on `{"text": "The rain fell on the empty street.", "kind":
+"scene"}` returned 200, `content-type: audio/wav`, 138,810 bytes of audio, and
+a `tts` row landed in `logs/usage.jsonl` on the FIRST try — `TTS_MODEL =
+"gemini-2.5-flash-preview-tts"` is live and correct, the `gemini-3.1-flash-tts`
+contingency swap was NOT needed. `/transcribe` on a stdlib-generated 1-second
+silent WAV (16kHz mono, all-zero samples) hit the account's free-tier *daily*
+request cap — a clean `429` (`{"detail": "Daily AI quota reached..."}`), not a
+500 or stack trace, so the contract held; no `stt` row was logged (expected —
+`call_gemini`'s 429 branch raises before a response, hence before usage
+logging, ever happens) and the transcription-quality question itself
+(silence in, near-empty text out) remains unverified pending a fresh-quota
+day. Both endpoints' error contracts (200/413/422/429/502/503) are otherwise
+pinned by `test_audio.py` alone.
+
 Supporting files: `requirements.txt` (fastapi, uvicorn, python-dotenv, google-genai,
-pytest), `.env.example` (template), real `.env` (holds `GEMINI_API_KEY`, git-ignored),
+pytest, python-multipart), `.env.example` (template), real `.env` (holds `GEMINI_API_KEY`, git-ignored),
 `.gitignore` (ignores `.env`, `venv/`, `__pycache__`, `logs/`), `story_templates.py`
 (genre-template loader), `usage_log.py` (cost meter), `templates/*.json` (the 4
 genres). Design docs live under `docs/superpowers/specs/` and `docs/superpowers/plans/`.
@@ -441,7 +494,23 @@ deviation from the original spec's `app/`).
   slice B/C. The "← Home" `Pressable` (`router.back()`) still sits in a
   header row above the ScrollView, and the `PushToTalk` bar still lives
   BELOW the ScrollView in a `pttArea` `View` so it stays visible while
-  scrolling.
+  scrolling. Narration (slice D) speaks AUTOMATICALLY and non-negotiably —
+  no per-turn opt-in: `runTurn`'s `turn_complete` calls
+  `voiceOut.speak(sceneText, {kind: "scene"})`, and `runConverse`'s
+  `discussion_complete` calls `voiceOut.speak(replyText, {kind: "reply"})`. A
+  `voiceOut.onSpeakingChange(setIsSpeaking)` effect keeps `isSpeaking` a
+  SEPARATE state from `isStreaming` on purpose (the co-creation review's
+  riding note — don't overload Stop-button semantics with playback state —
+  resolved here): narration can keep talking after a stream has already
+  finished, and the reverse. The "■ Stop" control now renders while
+  `isStreaming || isSpeaking` (either used to be sufficient alone) and its
+  press both aborts the in-flight stream AND calls `voiceOut.stop()` — one
+  button silences generation and narration together. `PushToTalk` gained an
+  `onActivate` prop wired to `voiceOut.stop()`: pressing the mic to speak
+  interrupts any narration playing, so the user is never talking over the
+  AI. `isStreaming` (NOT `isSpeaking`) still gates the mic's `disabled`
+  prop — you can start talking while a reply/scene narrates, since
+  interrupting it mid-word is the point.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
@@ -476,25 +545,58 @@ deviation from the original spec's `app/`).
 - **`lib/fetch.ts`** — `streamingFetch`, a one-line seam wrapping `expo/fetch`
   (streams response bodies on native; web's native `fetch` already streams).
   Tests mock this single function instead of touching the network.
-- **`lib/voice.ts`** — `getVoiceIn(): VoiceIn`, architecture rule #3 made real
-  (never call a speech service directly). Interface: `available` /
-  `start(cb)` / `stop()` / `abort()` — `stop()` finishes the recognizer and
-  delivers `onFinal`; `abort()` discards the in-flight session with NO
-  `onFinal` at all. Wraps the browser's built-in `SpeechRecognition`
-  (`window.SpeechRecognition` / `webkitSpeechRecognition` — works in Chrome,
-  zero new dependencies); `continuous = true` + `interimResults = true`
-  because hold-to-talk decides when the utterance ends, not the browser's own
-  silence-detection. A second `start()` while one is active `abort()`s the
-  superseded session first (`onend` nulled so it can't deliver a stale final)
-  — the double-start mic-leak guard. A browser with no `SpeechRecognition`
-  global gets a stub object (`available: false`, every method a no-op) rather
-  than throwing. Permission denial (`not-allowed` / `service-not-allowed`)
-  maps to a friendly "Microphone permission denied..." message via
-  `onError`; other recognizer errors pass through verbatim. Privacy note
-  recorded directly in the file: Chrome's recognizer sends audio to Google's
-  servers — dev-acceptable, revisit the wording before launch. The native
-  implementation (`expo-speech-recognition`, needs a dev build) arrives later
-  behind this SAME interface — that task is still pending.
+- **`lib/voice.ts`** — `getVoiceIn(): VoiceIn`, architecture rule #3 made
+  real (never call a speech service directly), now on its SECOND engine:
+  **record-then-transcribe**. Interface unchanged from slice C — `available`
+  / `start(cb)` / `stop()` / `abort()`, `stop()` finishes the recording and
+  delivers `onFinal`, `abort()` discards with NO callback at all — but the
+  engine underneath changed: hold-to-talk records a clip via `MediaRecorder`
+  (`audio/webm;codecs=opus` when supported), release uploads it as multipart
+  to `POST /transcribe`, and the server's Gemini call returns the words.
+  Chrome's built-in `SpeechRecognition` engine from slice C is RETIRED — live
+  play showed it garbling natural speech, and recognition quality is exactly
+  what this interface exists to let the project swap out. Web v2 NEVER calls
+  `onInterim` (no live words from server STT) — `PushToTalk` renders
+  "listening…"/"transcribing…" from PRESS STATE instead of recognizer
+  callbacks; the callback stays in the interface for a future streaming-STT
+  or native impl. A second `start()` while one is live still supersedes the
+  prior session (the double-start mic-leak guard carried over from slice
+  C) — its tracks are released and it's marked discarded so a late
+  `onstop`/upload response can't deliver a stale transcript. Media tracks are
+  ALWAYS released (`releaseTracks`, on finish, supersede, and abort alike) —
+  no hot mic left running. An in-flight `/transcribe` upload whose session
+  was aborted or superseded mid-upload is discarded on delivery, checked on
+  both the fetch's resolution and its rejection — the review-caught race a
+  fix added mid-slice, so a stale transcript can never land on a screen that
+  moved on. Permission denial maps to the same friendly
+  "Microphone permission denied..." message as before; a network failure
+  during upload gets its own "Couldn't reach the storyteller to transcribe"
+  message. A browser with no `getUserMedia`/`MediaRecorder` gets the same
+  `available: false` stub as before. The native implementation (record via
+  Expo's audio module, upload the same way — works in plain Expo Go, no dev
+  build needed anymore since recognition itself moved server-side) slots in
+  behind this SAME interface as a follow-up.
+- **`lib/voiceOut.ts`** — `getVoiceOut(): VoiceOut`, the narrator abstraction
+  (architecture rule #3's twin) and rule #2 (abortable audio) made real.
+  Interface: `available` / `speak(text, opts?: {kind})` / `stop()` /
+  `onSpeakingChange(cb)`. Primary path: POST the text to `/narrate`, play the
+  returned WAV through an `Audio` element. ANY failure downgrades to the
+  device's built-in voice (`speechSynthesis` + `SpeechSynthesisUtterance`)
+  for that utterance — a quota/network failure or a mid-playback `onerror`
+  all fall through, so the story is never silent because Gemini TTS ran out.
+  `EXPO_PUBLIC_USE_MOCK=1` always uses the device voice (the full loop demos
+  at zero cost, matching the backend's own mock stance). A monotonic
+  `generation` counter bumps on every `speak()`/`stop()` — the stale-async
+  guard: a `/narrate` response, blob-URL creation, or `Audio`/
+  `SpeechSynthesisUtterance` callback that resolves after a NEWER
+  `speak()`/`stop()` fired is a no-op, so two overlapping narrations (or one
+  that outlives a Stop press) can never both talk. `stop()` (`halt`) always
+  pauses/cancels whichever engine is live, revokes the blob URL, and flips
+  `isSpeaking` false — called on every Stop press and on unmount.
+  `onSpeakingChange` is a single-slot subscriber register (Story is the only
+  current subscriber — last-writer-wins if a second ever appears). No
+  `Audio`/`speechSynthesis` global at all → `available: false`, every method
+  a no-op, matching `VoiceIn`'s unavailable stub.
 - **`lib/matchCard.ts`** — `matchCard(utterance, cards): number | null`, a
   pure function: no network, no LLM (deliberately cheap — the free fast-path
   before falling back to `/converse`). ONE rule now, GUARDED ordinals only —
@@ -520,15 +622,23 @@ deviation from the original spec's `app/`).
   Network-ignorant: same input whether fed by live SSE, mock mode, or a test
   fixture.
 - **`components/PushToTalk.tsx`** — hold-to-talk `Pressable` behind
-  `VoiceIn`: `onPressIn` → `voice.start()`, `onPressOut` → `voice.stop()`.
-  Renders NOTHING when `voice.available` is false — no dead mic button on
-  unsupported browsers. The live interim transcript renders as plain `Text`,
-  deliberately NOT `StreamingText` — its append-only contract would break on
-  interim speech that rewrites itself mid-utterance. Inline mic-permission /
-  recognition errors render above the button. A `compact` prop switches from
+  `VoiceIn`: `onPressIn` → `voice.start()` (v2: begins recording),
+  `onPressOut` → `voice.stop()` (v2: uploads for transcription). Renders
+  NOTHING when `voice.available` is false — no dead mic button on
+  unsupported browsers. Status text now comes from PRESS STATE, not
+  recognizer callbacks (VoiceIn v2 never calls `onInterim`): a `phase` state
+  machine (`idle` / `listening` / `transcribing`) renders "listening…" while
+  the mic is held and "…" while the clip uploads, with an 8-second
+  stuck-phase timeout back to `idle` guarding against an empty clip (no
+  `onFinal`/`onError` fires for one, so nothing else would ever clear it).
+  Inline mic-permission / transcription-failure errors render above the
+  button. A new `onActivate` prop fires first thing in `handlePressIn`,
+  before `voice.start()` — Story wires it to `voiceOut.stop()` so pressing
+  the mic interrupts any narration playing. A `compact` prop switches from
   Story's full "🎤 Hold to talk" bar to an icon-only round button for Home; an
   overridable `testID` (default `"ptt-button"`) lets Home reuse the component
-  under its own `"premise-mic"` testID.
+  under its own `"premise-mic"` testID. Unmount still aborts any live
+  recording (slice C's hot-mic guard, unchanged).
 - **Env config**: `EXPO_PUBLIC_API_URL` (backend base URL — LAN IP, not
   `localhost`, when running on a phone via Expo Go) and `EXPO_PUBLIC_USE_MOCK`
   (`1` routes `streamTurn`/`converse()` to their `?mock=true` endpoints, the
@@ -540,8 +650,10 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **80 tests** across 8
-  suites, up from 62): `lib/__tests__/sse.test.ts` (frame parsing incl.
+- Tests (jest-expo preset, `restoreMocks: true`, **96 tests** across 9
+  suites, up from 80 — the delta is a new `lib/__tests__/voiceOut.test.ts`
+  suite plus a rewritten `voice.test.ts` for the v2 record-then-transcribe
+  engine and new narration cases in `story.test.tsx`): `lib/__tests__/sse.test.ts` (frame parsing incl.
   chunk-split and separator-split cases, malformed JSON, unknown events, and
   — new — `reply_token`/`discussion_complete` parsing plus all three `route`
   intents, with an unrecognized route intent yielding `stream_error` rather
@@ -552,11 +664,22 @@ deviation from the original spec's `app/`).
   `stream_error`, `reader.cancel()` on early exit — and, new, `converse()`
   posting to `/converse/stream` and yielding parsed frames while sharing
   `streamTurn`'s single error channel and silent-abort semantics);
-  `lib/__tests__/smoke.test.ts`; `lib/__tests__/voice.test.ts` (`getVoiceIn`:
-  unavailable with no `SpeechRecognition` global, interim transcripts
-  streaming then a final delivered on `stop()`, `abort()` discarding
-  everything with no final, permission-denial mapped to a friendly message, a
-  second `start()` aborting the superseded session with no orphaned mic);
+  `lib/__tests__/smoke.test.ts`; `lib/__tests__/voice.test.ts` (REWRITTEN for
+  VoiceIn v2's record-then-transcribe engine: `getVoiceIn` unavailable
+  without `mediaDevices`/`MediaRecorder`, `stop()` uploading the clip and
+  delivering the transcript with tracks released, `abort()` discarding with
+  no upload and no callbacks, permission denial mapped to the friendly
+  message, a failed transcription surfacing via `onError` not `onFinal`, an
+  empty transcript delivering nothing, a second `start()` discarding the
+  superseded session's upload, and — the Task 3 review-caught race — an
+  `abort()`/second-`start()` during an IN-FLIGHT upload suppressing that
+  stale delivery, plus permission denial after an abort delivering nothing);
+  `lib/__tests__/voiceOut.test.ts` (NEW: `getVoiceOut`'s `speak()` narrating
+  via `/narrate` and playing the returned WAV with `isSpeaking` flipping
+  on/off, `stop()` halting playback mid-word, a `/narrate` failure falling
+  back to the device voice, `stop()` while the fetch is still in flight
+  meaning the audio never plays, a second `speak()` superseding the first,
+  and unavailability with no audio capability at all);
   `lib/__tests__/matchCard.test.ts` (SLIMMED to ordinals-only: guarded
   ordinals incl. "the last one" and out-of-bounds, bare ordinal words inside
   long sentences NOT matching, pick-verbs unlocking ordinals in longer
@@ -586,7 +709,12 @@ deviation from the original spec's `app/`).
   turn, and does not duplicate the optimistic user bubble or discussion
   entry; consumed cards disappear once the next turn starts; PTT stays
   disabled while a turn is streaming; a mic-permission error renders inline;
-  the "← Home" back control exists); a `resolveStoryLength` unit-test block
+  the "← Home" back control exists; and — NEW for narration — a scene speaks
+  when its turn completes, a reply speaks when its discussion completes, the
+  "■ Stop" control silences narration too (on top of aborting a stream),
+  holding the mic interrupts any narration playing, and speaking never
+  disables the mic because `isSpeaking` is not `isStreaming`); a
+  `resolveStoryLength` unit-test block
   (4 tests) pinning the total fallback to `"short"` for an invalid string, an
   array (duplicated query param), and a missing value. Gemini is never
   reached from these tests — the backend has its own separate suite.
@@ -616,6 +744,24 @@ deviation from the original spec's `app/`).
   window couldn't double-fire — moot now that the confirm bar/timer itself
   is gone (see the Story screen description above; conversational
   co-creation replaced it with instant ordinal picks + a "■ Stop" control).
+- Audio slice (slice D — `/transcribe` ears, `/narrate` mouth, `VoiceIn` v2,
+  `VoiceOut`, the Story narration wiring above) SHIPPED, commits `9be7069`
+  (`/narrate`) through `95fb9a5` (auto-narration wiring). Task 3's own
+  final-review fix (commit `402a99e`) closed a plan-authored race: an
+  in-flight `/transcribe` upload could deliver stale `onFinal`/`onError`
+  callbacks after its session was aborted or superseded — fixed with
+  discarded re-checks in the upload and permission continuations, 3
+  regression tests. Verified 2026-07-04 (this checkpoint): `npx jest
+  --watchAll=false` → 96/96 across 9 suites; `npx tsc --noEmit` clean; `npx
+  expo export --platform web` clean. Riding minors: the last blob URL of a
+  playback session is never revoked on natural `onended` (a bounded leak);
+  `onSpeakingChange` is single-slot (fine while Story is the only
+  subscriber); a theoretical silent-playback edge if `Audio` exists but
+  `speechSynthesis` doesn't under `USE_MOCK`. BROWSER-COMPLETE, mock-verified
+  and live-Gemini-verified for `/narrate` (see the backend section's
+  live-verify paragraph); the owner's Chrome mic-and-ear gut-check (speaking
+  a real utterance, hearing the Gemini voice, interrupting it) has NOT
+  happened yet — that hand-off is what closes this slice for real.
 
 ## Environment / how to run
 
@@ -640,21 +786,36 @@ The approved phase plan lives in
    data files, `GET /templates`), token/cost logging, public GitHub remote. All
    live-verified against real Gemini; see "What's BUILT and WORKING" above.
 2. **Phase 2 (IN PROGRESS): vertical slice** — Expo app skeleton, streaming (SSE)
-   story view with animated text, push-to-talk on-device speech recognition,
-   conversational co-creation (discuss/steer/pick/options routed through one
-   fused call), narration v1 (quality TTS ~$5 + device-TTS fallback),
-   abortable playback.
+   story view with animated text, push-to-talk voice input, conversational
+   co-creation (discuss/steer/pick/options routed through one fused call),
+   narration v1 (Gemini TTS + device-TTS fallback), abortable playback.
    Slice A (backend SSE streaming + mock mode) DONE. Slice B (Expo app: screens,
    `lib/` bridge, StreamingText animation) DONE. Slice C (push-to-talk +
    conversational co-creation: `VoiceIn` abstraction, the ordinals-only
    `matchCard` fast-path, `/converse/stream`, the feed/bubble UI, notes
-   canon) SHIPPED and mock-verified in the browser — see "Client app
-   (`client/`)" above; the confirm-bar flow from the original push-to-talk
-   design was removed along the way in favor of instant ordinal picks + a
-   stop control. The native build (`expo-speech-recognition` behind the same
-   `VoiceIn` interface) is still pending, parked on the user's phone-OS
-   decision. Slice D (narration v1) is next, designing against the feed
-   model (scene text + bubbles) this slice introduced.
+   canon) SHIPPED and mock-verified in the browser; the confirm-bar flow from
+   the original push-to-talk design was removed along the way in favor of
+   instant ordinal picks + a stop control. Slice D (narration v1: `/transcribe`,
+   `/narrate`, `VoiceIn` v2 record-then-transcribe, `VoiceOut`, auto-narration
+   wiring — see "Client app (`client/`)" and the backend section above)
+   SHIPPED and BROWSER-COMPLETE: all suites green (backend 115, client 96),
+   `/narrate` live-verified against real Gemini TTS, `/transcribe`'s contract
+   (never a 500) live-verified though its actual transcription quality
+   wasn't (free-tier daily quota). Chrome's `SpeechRecognition` engine from
+   slice C was RETIRED mid-slice in favor of server-side Gemini STT — better
+   recognition quality was the whole point, so voice input now runs through
+   the same backend as everything else, no dev build required. STILL
+   PENDING, riding to a future session: (1) the owner's live Chrome
+   mic-and-ear gut-check — speak a premise, hear the Gemini voice, interrupt
+   it mid-word, judge transcription accuracy and voice quality — this is the
+   slice's actual acceptance test and hasn't run yet; (2) the phone follow-up
+   (an Expo Go recording implementation behind the same `VoiceIn`/`VoiceOut`
+   interfaces — no dev build needed now that recognition itself is
+   server-side); (3) the paid-tier flip, still recommended — audio doubles
+   the Gemini calls per turn on a free tier that already 503s under load.
+   Phase 4 (below) is next on the audio track once the gut-check lands:
+   streamed narration (word-synced playback instead of whole-clip WAV) and
+   per-genre voices.
 3. **Phase 3: product core** — story persistence (SQLite, story IDs), voice-driven
    editing with morph animation, prompt caching, latency/failure UX.
 4. **Phase 4: expressive narration** — streamed audio, per-genre voices, loose sync.
