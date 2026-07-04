@@ -144,3 +144,152 @@ def test_notes_prompt_carries_word_limit_and_pieces():
     assert "Old fact." in prompt
     assert "who is she?" in prompt
     assert "A stubborn mapmaker." in prompt
+
+
+# --- /converse/stream real path ---------------------------------------------
+
+def test_converse_discuss_streams_reply_then_folds_notes(monkeypatch):
+    def fake_stream(contents, **kwargs):
+        assert kwargs["label"] == "converse"
+        assert kwargs["max_tokens"] == main.CONVERSE_BUDGET
+        # Intent line and the reply's first words arrive in ONE chunk — the
+        # endpoint must forward only what follows the newline.
+        yield "INTENT: discuss\nShe is "
+        yield "stubborn."
+
+    captured = {}
+
+    def fake_notes(contents, **kw):
+        captured["label"] = kw.get("label")
+        captured["max_tokens"] = kw.get("max_tokens")
+        assert "She is stubborn." in contents  # the reply reaches the scribe
+        assert "tell me more about her" in contents  # so does the utterance
+        return '{"notes": "Mira is stubborn."}'
+
+    monkeypatch.setattr(main, "call_gemini_stream", fake_stream)
+    monkeypatch.setattr(main, "call_gemini", fake_notes)
+
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [e["event"] for e in events] == [
+        "reply_token",
+        "reply_token",
+        "discussion_complete",
+    ]
+    assert "".join(e["data"]["t"] for e in events[:2]) == "She is stubborn."
+    assert events[-1]["data"] == {"notes": "Mira is stubborn."}
+    assert captured == {"label": "notes_fold", "max_tokens": main.NOTES_BUDGET}
+
+
+def test_converse_pick_routes_zero_based(monkeypatch):
+    monkeypatch.setattr(
+        main, "call_gemini_stream", lambda c, **kw: iter(["INTENT: pick 2\n"])
+    )
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events == [{"event": "route", "data": {"intent": "pick", "index": 1}}]
+
+
+def test_converse_steer_routes(monkeypatch):
+    monkeypatch.setattr(
+        main, "call_gemini_stream", lambda c, **kw: iter(["INTENT: steer"])
+    )
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events == [{"event": "route", "data": {"intent": "steer"}}]
+
+
+def test_converse_options_routes_fresh_scenarios(monkeypatch):
+    def fake_stream(contents, **kwargs):
+        yield "INTENT: options\n"
+        yield '{"scenarios": ["New A", '
+        yield '"New B", "New C"]}'
+
+    monkeypatch.setattr(main, "call_gemini_stream", fake_stream)
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events == [
+        {
+            "event": "route",
+            "data": {"intent": "options", "scenarios": ["New A", "New B", "New C"]},
+        }
+    ]
+
+
+def test_converse_options_empty_scenarios_is_error_frame(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "call_gemini_stream",
+        lambda c, **kw: iter(['INTENT: options\n{"scenarios": []}']),
+    )
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 502
+
+
+def test_converse_invalid_pick_gets_fixed_clarification(monkeypatch):
+    monkeypatch.setattr(
+        main, "call_gemini_stream", lambda c, **kw: iter(["INTENT: pick 7\n"])
+    )
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert [e["event"] for e in events] == ["reply_token", "discussion_complete"]
+    assert events[0]["data"]["t"] == main.pick_clarification(3)
+    # Notes unchanged, no scribe call was needed (call_gemini is unmocked:
+    # the conftest tripwire proves it was never reached).
+    assert events[-1]["data"] == {"notes": CONVERSE_BODY["notes"]}
+
+
+def test_converse_garbage_intent_line_is_error_frame(monkeypatch):
+    monkeypatch.setattr(
+        main, "call_gemini_stream", lambda c, **kw: iter(["Once upon a time\nmore"])
+    )
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 502
+
+
+def test_converse_notes_scribe_garbage_keeps_reply_tokens(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "call_gemini_stream",
+        lambda c, **kw: iter(["INTENT: discuss\nHere is a reply."]),
+    )
+    monkeypatch.setattr(main, "call_gemini", lambda c, **kw: "not json")
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events[0] == {"event": "reply_token", "data": {"t": "Here is a reply."}}
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 502
+
+
+def test_converse_midstream_failure_becomes_error_frame(monkeypatch):
+    from fastapi import HTTPException
+
+    def dies_mid_reply(contents, **kwargs):
+        yield "INTENT: discuss\nFirst words "
+        raise HTTPException(status_code=503, detail="model went away")
+
+    monkeypatch.setattr(main, "call_gemini_stream", dies_mid_reply)
+    resp = client.post("/converse/stream", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events[0] == {"event": "reply_token", "data": {"t": "First words "}}
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["status"] == 503
+
+
+def test_converse_unknown_template_is_404_before_streaming():
+    resp = client.post(
+        "/converse/stream", json=dict(CONVERSE_BODY, template_id="nope")
+    )
+    assert resp.status_code == 404
+
+
+def test_converse_missing_utterance_is_422():
+    body = dict(CONVERSE_BODY)
+    del body["utterance"]
+    resp = client.post("/converse/stream", json=body)
+    assert resp.status_code == 422

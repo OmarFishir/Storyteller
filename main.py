@@ -816,6 +816,110 @@ def _stream_turn(req: ContinueRequest, template: dict):
         )
 
 
+def _stream_converse(req: ConverseRequest, template: dict):
+    """
+    The conversational channel. ONE fused call: first line = intent verdict,
+    then (discuss only) the reply prose. Same failure contract as
+    _stream_turn: anything after streaming begins becomes a terminal error
+    frame; tokens already forwarded are kept.
+    """
+    try:
+        token_iter = call_gemini_stream(
+            build_converse_prompt(template, req),
+            max_tokens=CONVERSE_BUDGET,
+            temperature=0.8,
+            label="converse",
+        )
+
+        # Consume until the first newline: that's the whole intent line.
+        # (pick/steer outputs may be a single line with no newline at all.)
+        buffer = ""
+        for token in token_iter:
+            buffer += token
+            if "\n" in buffer:
+                break
+        if "\n" in buffer:
+            first_line, rest = buffer.split("\n", 1)
+        else:
+            first_line, rest = buffer, ""
+
+        intent, index = parse_intent_line(first_line, len(req.options))
+
+        if intent == "pick":
+            yield sse_event("route", {"intent": "pick", "index": index})
+            return
+        if intent == "steer":
+            yield sse_event("route", {"intent": "steer"})
+            return
+        if intent == "options":
+            remainder = rest + "".join(token_iter)
+            scenarios = parse_scenarios(remainder)
+            if not scenarios:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Model returned zero fresh options. Please retry.",
+                )
+            yield sse_event("route", {"intent": "options", "scenarios": scenarios})
+            return
+        if intent == "pick_invalid":
+            # Fixed clarification: deterministic, no extra model call, notes
+            # unchanged — never a 500 and never a blind turn (spec).
+            yield sse_event("reply_token", {"t": pick_clarification(len(req.options))})
+            yield sse_event("discussion_complete", {"notes": req.notes})
+            return
+
+        # discuss: forward the reply as it streams, then fold the notes.
+        reply_parts: list[str] = []
+        if rest:
+            reply_parts.append(rest)
+            yield sse_event("reply_token", {"t": rest})
+        for token in token_iter:
+            reply_parts.append(token)
+            yield sse_event("reply_token", {"t": token})
+
+        reply = "".join(reply_parts).strip()
+        raw = call_gemini(
+            build_notes_prompt(req.notes, req.utterance, reply),
+            max_tokens=NOTES_BUDGET,
+            temperature=0.7,
+            label="notes_fold",
+        )
+        yield sse_event("discussion_complete", {"notes": parse_notes(raw)})
+    except HTTPException as e:
+        yield sse_event("error", {"status": e.status_code, "detail": e.detail})
+    except Exception as e:
+        print(f"WARNING: unexpected converse streaming error: {e!r}", file=sys.stderr)
+        yield sse_event(
+            "error",
+            {"status": 500, "detail": "Something went wrong. Please retry."},
+        )
+
+
+def _stream_converse_mock(req: ConverseRequest):
+    """Task 3 implements the canned mock; until then mock mode yields an error frame."""
+    yield sse_event("error", {"status": 500, "detail": "Mock not implemented yet."})
+
+
+@app.post("/converse/stream")
+def converse_stream(req: ConverseRequest, mock: bool = False):
+    """The discussion channel: route the utterance, stream the reply. Never writes scenes."""
+    template = get_template_or_404(req.template_id)
+
+    if mock:
+        if os.environ.get("DEV_MOCK_ENABLED") != "1":
+            raise HTTPException(
+                status_code=403,
+                detail="Mock mode is disabled. Set DEV_MOCK_ENABLED=1 in .env for development.",
+            )
+        return StreamingResponse(
+            _stream_converse_mock(req), media_type="text/event-stream"
+        )
+
+    return StreamingResponse(
+        _stream_converse(req, template), media_type="text/event-stream"
+    )
+
+
 @app.post("/continue/stream")
 def continue_story_stream(req: ContinueRequest, mock: bool = False):
     """Streaming twin of /continue: scene tokens as SSE, then the folded turn."""
