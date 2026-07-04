@@ -278,7 +278,7 @@ reading/export view arrives with persistence in Phase 3. Full design:
 
 Tests in `tests/test_api.py`, `tests/test_templates.py`, `tests/test_beats.py`,
 and `tests/test_converse.py`
-(pytest + FastAPI `TestClient`, **102 tests** — up from 69; the delta is
+(pytest + FastAPI `TestClient`, **103 tests** — up from 69; the delta is
 `test_converse.py`'s new suite plus 3 notes-aware additions to
 `test_api.py`): health
 check; retry-then-succeed
@@ -540,7 +540,7 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **77 tests** across 8
+- Tests (jest-expo preset, `restoreMocks: true`, **80 tests** across 8
   suites, up from 62): `lib/__tests__/sse.test.ts` (frame parsing incl.
   chunk-split and separator-split cases, malformed JSON, unknown events, and
   — new — `reply_token`/`discussion_complete` parsing plus all three `route`
@@ -591,9 +591,21 @@ deviation from the original spec's `app/`).
   array (duplicated query param), and a missing value. Gemini is never
   reached from these tests — the backend has its own separate suite.
   Run: `cd client && npx jest --watchAll=false`.
-- Verified 2026-07-04: `npx jest --watchAll=false` → 77/77 passing across 8
+- Verified 2026-07-04: `npx jest --watchAll=false` → 80/80 passing across 8
   suites; `npx tsc --noEmit` clean; `npx expo export --platform web` produces
   a static bundle (`client/dist/`, git-ignored) with no errors.
+- Conversational-co-creation final-review hardening (same day, commit
+  `e097e13`): ■ Stop pressed while a converse stream is still open suppresses
+  any already-captured `route` (a braked route can never fire a turn — the
+  guard also covers routes arriving on an unmounted screen); `parse_notes`
+  rejects blank/whitespace notes with a 502 (one bad scribe output can no
+  longer silently erase all canon — trade-off: a zero-canon exchange whose
+  scribe returns literally empty text surfaces as a retryable error, the
+  right asymmetry); the SSE `route` parser treats a pick without a valid
+  index or an options frame without scenarios as malformed-frame
+  `stream_error`s (defensive — the server validates upstream); the converse
+  temperatures (0.8/0.7) are pinned by tests like every other call's cost
+  caps.
 - Final-review hardening (same day, commit `57da2f7`): `matchCard`'s "last"
   path bounds-guarded against an empty cards list; `PushToTalk` aborts any
   live recognition on unmount (no hot mic / ghost turn after navigating
