@@ -293,3 +293,51 @@ def test_converse_missing_utterance_is_422():
     del body["utterance"]
     resp = client.post("/converse/stream", json=body)
     assert resp.status_code == 422
+
+
+# --- /converse/stream mock mode ----------------------------------------------
+
+
+def test_converse_mock_403_when_env_unset(monkeypatch):
+    monkeypatch.delenv("DEV_MOCK_ENABLED", raising=False)
+    resp = client.post("/converse/stream?mock=true", json=CONVERSE_BODY)
+    assert resp.status_code == 403
+
+
+def test_converse_mock_discuss_streams_canned_reply(monkeypatch):
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    resp = client.post("/converse/stream?mock=true", json=CONVERSE_BODY)
+    events = parse_sse(resp.text)
+    assert events[-1]["event"] == "discussion_complete"
+    reply = "".join(e["data"]["t"] for e in events[:-1])
+    assert reply == main.MOCK_CONVERSE_REPLY
+    assert events[-1]["data"] == {"notes": main.MOCK_CONVERSE_NOTES}
+
+
+def test_converse_mock_options_trigger(monkeypatch):
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    resp = client.post(
+        "/converse/stream?mock=true",
+        json=dict(CONVERSE_BODY, utterance="give me different ideas"),
+    )
+    events = parse_sse(resp.text)
+    assert events == [
+        {
+            "event": "route",
+            "data": {
+                "intent": "options",
+                "scenarios": main.MOCK_TURNS[0]["scenarios"],
+            },
+        }
+    ]
+
+
+def test_converse_mock_steer_trigger(monkeypatch):
+    monkeypatch.setenv("DEV_MOCK_ENABLED", "1")
+    resp = client.post(
+        "/converse/stream?mock=true",
+        json=dict(CONVERSE_BODY, utterance="she burns the letter and runs"),
+    )
+    events = parse_sse(resp.text)
+    assert events == [{"event": "route", "data": {"intent": "steer"}}]

@@ -479,6 +479,42 @@ def _stream_mock(summary: str):
     )
 
 
+# Canned converse behavior, utterance-triggered so every client path is
+# demoable offline: "idea"/"option" -> fresh options; a third-person sentence
+# ("she/he/they ...") -> steer; anything else -> a canned discussion reply.
+# Deterministic, zero Gemini calls (the conftest tripwire enforces it).
+MOCK_CONVERSE_REPLY = (
+    "Mira is stubborn the way lighthouse keepers are stubborn — she trusts "
+    "her own light first. We could decide what she lost the year she started "
+    "correcting maps. What feels true to you?"
+)
+MOCK_CONVERSE_NOTES = (
+    "Mira is a stubborn apprentice mapmaker who trusts her own judgment and "
+    "compulsively corrects wrong maps."
+)
+
+
+def _stream_converse_mock(req: ConverseRequest):
+    """Canned converse turn, chosen by simple utterance triggers (see above)."""
+    lowered = req.utterance.lower()
+    if "idea" in lowered or "option" in lowered:
+        yield sse_event(
+            "route",
+            {"intent": "options", "scenarios": MOCK_TURNS[0]["scenarios"]},
+        )
+        return
+    if lowered.startswith(("she ", "he ", "they ")):
+        yield sse_event("route", {"intent": "steer"})
+        return
+
+    words = MOCK_CONVERSE_REPLY.split(" ")
+    for i, word in enumerate(words):
+        token = word if i == len(words) - 1 else word + " "
+        yield sse_event("reply_token", {"t": token})
+        time.sleep(0.03)  # realistic pacing for animation work; patched in tests
+    yield sse_event("discussion_complete", {"notes": MOCK_CONVERSE_NOTES})
+
+
 def parse_model_json(raw_text: str) -> dict:
     """
     Models sometimes wrap JSON in ```json fences or add stray text, even when
@@ -893,11 +929,6 @@ def _stream_converse(req: ConverseRequest, template: dict):
             "error",
             {"status": 500, "detail": "Something went wrong. Please retry."},
         )
-
-
-def _stream_converse_mock(req: ConverseRequest):
-    """Task 3 implements the canned mock; until then mock mode yields an error frame."""
-    yield sse_event("error", {"status": 500, "detail": "Mock not implemented yet."})
 
 
 @app.post("/converse/stream")
