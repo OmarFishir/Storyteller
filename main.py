@@ -99,6 +99,22 @@ class ContinueRequest(BaseModel):
     length: Literal["short", "medium", "long"] = "short"
 
 
+class DiscussionEntry(BaseModel):
+    role: Literal["user", "ai"]
+    text: str
+
+
+class ConverseRequest(BaseModel):
+    template_id: str
+    utterance: str
+    summary: str
+    notes: str = ""
+    options: list[str] = []
+    discussion: list[DiscussionEntry] = []
+    turn: int = Field(1, ge=1)
+    length: Literal["short", "medium", "long"] = "short"
+
+
 # ---------------------------------------------------------------------------
 # 3. The prompt
 # ---------------------------------------------------------------------------
@@ -166,6 +182,53 @@ Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
 {"summary": "updated summary", "scenarios": ["option one", "option two", "option three"]}"""
 
 
+# --- Conversational co-creation ---------------------------------------------
+# The fused router+responder call for /converse/stream. ONE cheap call decides
+# what the user meant AND acts on it: the FIRST LINE of its output is a
+# machine-readable verdict; only "discuss" continues with prose. When unsure it
+# must choose discuss — the cheap, story-safe default (a misroute costs one
+# reply, never a polluted story).
+CONVERSE_PROMPT = """You are the story companion for an interactive story app.
+The user just spoke. Decide what they meant and answer in EXACTLY the format below.
+
+They might be:
+- picking one of the numbered option cards -> first line: INTENT: pick N
+  (N is the card number as listed, counting from 1; output NOTHING else)
+- steering the story with a new direction of their own -> first line: INTENT: steer
+  (output NOTHING else; the app uses their words verbatim)
+- asking for different or new option ideas -> first line: INTENT: options
+  then, on the following lines, ONLY raw JSON, no markdown, no backticks:
+  {"scenarios": ["option one", "option two", "option three"]}
+  (exactly 3 options, each 3-4 sentences, meaningfully different, informed by
+  the discussion and notes below)
+- discussing the story: asking about an option card, a character, the world;
+  inventing backstory together; thinking aloud -> first line: INTENT: discuss
+  then, starting on the next line, your conversational reply: warm,
+  collaborative, 2-5 sentences, grounded ONLY in the story materials below.
+  You may end with one question back to the user. Never write the next scene here.
+
+If you are not sure which they meant, choose INTENT: discuss.
+The first line must be exactly one of: "INTENT: pick N", "INTENT: steer",
+"INTENT: options", "INTENT: discuss" — nothing else on that line."""
+
+# The notes scribe — the discussion channel's counterpart of FOLD_PROMPT.
+# Summary = what HAPPENED (the fold call owns it); notes = what is TRUE
+# (this call owns it). Only this call ever writes notes.
+NOTES_PROMPT = """You are the keeper of story notes (canon) for an interactive story.
+You receive the existing notes and the newest exchange between the user and
+the story companion. Fold any NEW durable facts the exchange established
+(character names, backstory, relationships, world truths, decisions about
+what is true) into the notes. Preserve existing facts; on conflict the newest
+detail wins. If the exchange established nothing durable, return the notes
+unchanged. Stay under the word limit given below.
+Respond with ONLY raw JSON, no markdown, no backticks, in exactly this shape:
+{"notes": "the updated notes"}"""
+
+CONVERSE_BUDGET = 600  # covers the biggest case: 3 fresh options
+NOTES_BUDGET = 200
+NOTES_WORDS = 120
+
+
 def build_scene_prompt(template: dict, req: ContinueRequest) -> str:
     """Assemble the storyteller prompt: static -> style -> beat -> dynamic."""
     beats = story_beats.select_beats(template.get("structure"), req.turn, req.length)
@@ -203,6 +266,89 @@ def build_fold_prompt(req: ContinueRequest, scene: str) -> str:
         f"{SUMMARY_WORDS[req.length]} words.{steer_block}\n\n"
         f"Story-so-far summary:\n{req.summary}\n\nNewest scene:\n{scene}"
     )
+
+
+def build_converse_prompt(template: dict, req: ConverseRequest) -> str:
+    """Assemble the fused router+responder prompt: static -> style -> dynamic."""
+    options_block = (
+        "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(req.options))
+        or "(none offered yet)"
+    )
+    discussion_block = (
+        "\n".join(
+            f"{'User' if d.role == 'user' else 'You'}: {d.text}"
+            for d in req.discussion[-6:]  # belt-and-braces cap; client caps too
+        )
+        or "(no discussion yet)"
+    )
+    return (
+        f"{CONVERSE_PROMPT}\n\nGenre style:\n{template['style']}\n\n"
+        f"Established story notes (canon):\n{req.notes or '(none yet)'}\n\n"
+        f"Story so far:\n{req.summary}\n\n"
+        f"Current option cards:\n{options_block}\n\n"
+        f"Recent discussion:\n{discussion_block}\n\n"
+        f"The user just said:\n{req.utterance}"
+    )
+
+
+def build_notes_prompt(notes: str, utterance: str, reply: str) -> str:
+    """Assemble the notes-scribe prompt; the word cap keeps canon bounded."""
+    return (
+        f"{NOTES_PROMPT}\n\nWord limit for the notes: {NOTES_WORDS} words.\n\n"
+        f"Existing notes:\n{notes or '(none yet)'}\n\n"
+        f"User said:\n{utterance}\n\nCompanion replied:\n{reply}"
+    )
+
+
+_INTENT_RE = re.compile(
+    r"^\s*INTENT:\s*(discuss|steer|options|pick(?:\s+(\d+))?)\s*$", re.IGNORECASE
+)
+
+
+def parse_intent_line(line: str, options_count: int) -> tuple[str, int | None]:
+    """
+    Parse the fused call's first line. Returns (intent, index): index is
+    0-BASED and set only for in-range picks (the model speaks 1-based, like
+    the numbered card list it sees). An out-of-range or number-less pick
+    DOWNGRADES to ("pick_invalid", None) — the endpoint answers with a fixed
+    clarification bubble, never a 500 and never a blind turn. A first line
+    that isn't an INTENT line at all is model garbage: clean 502.
+    """
+    m = _INTENT_RE.match(line)
+    if m is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model returned an unreadable intent line. Raw: {line[:200]}",
+        )
+    kind = m.group(1).lower()
+    if kind.startswith("pick"):
+        number = m.group(2)
+        if number is None:
+            return ("pick_invalid", None)
+        idx = int(number) - 1
+        if 0 <= idx < options_count:
+            return ("pick", idx)
+        return ("pick_invalid", None)
+    return (kind, None)
+
+
+def pick_clarification(options_count: int) -> str:
+    """Fixed reply when the model picked a card that doesn't exist."""
+    if options_count == 0:
+        return "There are no option cards right now — ask me for some ideas!"
+    return f"I only offered {options_count} ideas — which one did you mean?"
+
+
+def parse_notes(raw_text: str) -> str:
+    """Validate the notes scribe's shape: {"notes": str}."""
+    data = parse_model_json(raw_text)
+    notes = data.get("notes")
+    if not isinstance(notes, str):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'notes'. Raw: {raw_text[:300]}",
+        )
+    return notes
 
 
 # --- Mock mode -------------------------------------------------------------
