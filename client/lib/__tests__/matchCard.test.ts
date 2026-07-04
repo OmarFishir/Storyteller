@@ -37,24 +37,16 @@ describe("matchCard - ordinals (guarded)", () => {
   });
 });
 
-describe("matchCard - word overlap", () => {
-  it("two+ distinctive shared words pick the clear winner", () => {
-    expect(matchCard("she forces the iron door open", CARDS)).toBe(0);
-    expect(matchCard("follow the footsteps in the corridor", CARDS)).toBe(2);
-  });
-
-  it("ambiguity returns null instead of guessing", () => {
-    // "door" appears in cards 0 and 1; one shared word each - no clear winner
-    expect(matchCard("the door", CARDS)).toBeNull();
-  });
-
-  it("gibberish and unrelated free-form steering return null", () => {
-    expect(matchCard("she sets fire to the archive and flees north", CARDS)).toBeNull();
-    expect(matchCard("blorp fizzle", CARDS)).toBeNull();
-  });
-
-  it("empty utterance is null", () => {
-    expect(matchCard("", CARDS)).toBeNull();
-    expect(matchCard("   ", CARDS)).toBeNull();
+describe("matchCard - content references are not fast-path picks", () => {
+  it.each([
+    ["she forces the iron door open"],
+    ["tell me more about the iron door one"],
+    ["follow the footsteps in the corridor"],
+    ["the door"],
+    ["blorp fizzle"],
+    [""],
+    ["   "],
+  ])("%s -> null (routes to /converse)", (utterance) => {
+    expect(matchCard(utterance, CARDS)).toBeNull();
   });
 });
