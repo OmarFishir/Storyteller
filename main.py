@@ -14,11 +14,13 @@ Run it locally with:
 Then it lives at http://127.0.0.1:8000
 """
 
+import io
 import os
 import json
 import re
 import sys
 import time
+import wave
 from collections.abc import Iterator
 from typing import Literal
 
@@ -827,6 +829,96 @@ async def transcribe(audio: UploadFile = File(...)):
         label="stt",
     )
     return {"transcript": text.strip()}
+
+
+# --- Audio slice: the mouth --------------------------------------------------
+TTS_MODEL = "gemini-2.5-flash-preview-tts"  # swap-in-one-place, like MODEL
+VOICE_NAME = "charon"  # v1: one narrator voice; per-genre voices are Phase 4
+TTS_BUDGET = 4000  # audio tokens ceiling (~25/sec => ~2.5min of speech)
+NARRATE_CHAR_CAP = 6000  # scenes are budget-bounded; this is abuse armor
+
+
+class NarrateRequest(BaseModel):
+    text: str
+    kind: Literal["scene", "reply"] = "scene"
+
+
+def pcm_to_wav(pcm: bytes, sample_rate: int = 24000) -> bytes:
+    """Wrap raw 16-bit mono PCM in a WAV container (browsers can't play bare PCM)."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def call_gemini_tts(text: str, label: str = "tts") -> bytes:
+    """
+    ONE TTS request: text in, raw PCM bytes out. Mirrors call_gemini's error
+    contract (retry 5xx w/ backoff; clean 429; empty output -> 502) — the
+    retry block is now duplicated a third time; extraction is queued for the
+    Phase 3 main.py split, consistency wins until then.
+    """
+    delays = [1, 2, 4]
+    for attempt in range(len(delays) + 1):
+        try:
+            response = client.models.generate_content(
+                model=TTS_MODEL,
+                contents=text,
+                config=types.GenerateContentConfig(
+                    response_modalities=["audio"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=VOICE_NAME
+                            )
+                        )
+                    ),
+                    max_output_tokens=TTS_BUDGET,
+                ),
+            )
+            usage = getattr(response, "usage_metadata", None)
+            try:
+                usage_log.log_usage(
+                    label=label,
+                    model=TTS_MODEL,
+                    input_tokens=(usage.prompt_token_count or 0) if usage else 0,
+                    output_tokens=(usage.candidates_token_count or 0) if usage else 0,
+                )
+            except Exception as e:
+                print(f"WARNING: usage logging failed: {e}", file=sys.stderr)
+            parts = getattr(response, "parts", None) or []
+            for part in parts:
+                inline = getattr(part, "inline_data", None)
+                if inline is not None and inline.data:
+                    return inline.data
+            raise HTTPException(
+                status_code=502,
+                detail="Model returned no audio. Try again.",
+            )
+        except errors.ClientError as e:
+            if getattr(e, "code", None) == 429:
+                raise HTTPException(status_code=429, detail=DETAIL_QUOTA)
+            raise
+        except errors.ServerError:
+            if attempt < len(delays):
+                time.sleep(delays[attempt])
+
+    raise HTTPException(status_code=503, detail=DETAIL_MODEL_BUSY)
+
+
+@app.post("/narrate")
+def narrate(req: NarrateRequest):
+    """Text-to-speech for narration: a finished scene or reply in, WAV out."""
+    if len(req.text) > NARRATE_CHAR_CAP:
+        raise HTTPException(
+            status_code=413,
+            detail="Narration text too long.",
+        )
+    pcm = call_gemini_tts(req.text)
+    return Response(content=pcm_to_wav(pcm), media_type="audio/wav")
 
 
 @app.post("/continue")
