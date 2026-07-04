@@ -347,7 +347,7 @@ def parse_notes(raw_text: str) -> str:
     """Validate the notes scribe's shape: {"notes": str}."""
     data = parse_model_json(raw_text)
     notes = data.get("notes")
-    if not isinstance(notes, str):
+    if not isinstance(notes, str) or not notes.strip():
         raise HTTPException(
             status_code=502,
             detail=f"Model JSON missing valid 'notes'. Raw: {raw_text[:300]}",

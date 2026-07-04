@@ -93,4 +93,18 @@ describe("converse frames", () => {
       { type: "stream_error", status: 500, detail: "Malformed stream frame." },
     ]);
   });
+
+  it("route pick without a valid index is a stream_error", () => {
+    const p = new SSEParser();
+    expect(p.feed('event: route\ndata: {"intent": "pick"}\n\n')).toEqual([
+      { type: "stream_error", status: 500, detail: "Malformed stream frame." },
+    ]);
+  });
+
+  it("route options without scenarios is a stream_error", () => {
+    const p = new SSEParser();
+    expect(p.feed('event: route\ndata: {"intent": "options"}\n\n')).toEqual([
+      { type: "stream_error", status: 500, detail: "Malformed stream frame." },
+    ]);
+  });
 });

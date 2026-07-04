@@ -103,6 +103,14 @@ def test_parse_notes_missing_key_is_502():
     assert exc.value.status_code == 502
 
 
+def test_parse_notes_blank_is_502():
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        main.parse_notes('{"notes": "   "}')
+    assert exc.value.status_code == 502
+
+
 # --- prompt builders ---------------------------------------------------------
 
 def test_converse_prompt_order_static_style_notes_summary_options_discussion_utterance():
@@ -152,6 +160,7 @@ def test_converse_discuss_streams_reply_then_folds_notes(monkeypatch):
     def fake_stream(contents, **kwargs):
         assert kwargs["label"] == "converse"
         assert kwargs["max_tokens"] == main.CONVERSE_BUDGET
+        assert kwargs["temperature"] == 0.8
         # Intent line and the reply's first words arrive in ONE chunk — the
         # endpoint must forward only what follows the newline.
         yield "INTENT: discuss\nShe is "
@@ -162,6 +171,7 @@ def test_converse_discuss_streams_reply_then_folds_notes(monkeypatch):
     def fake_notes(contents, **kw):
         captured["label"] = kw.get("label")
         captured["max_tokens"] = kw.get("max_tokens")
+        captured["temperature"] = kw.get("temperature")
         assert "She is stubborn." in contents  # the reply reaches the scribe
         assert "tell me more about her" in contents  # so does the utterance
         return '{"notes": "Mira is stubborn."}'
@@ -179,7 +189,11 @@ def test_converse_discuss_streams_reply_then_folds_notes(monkeypatch):
     ]
     assert "".join(e["data"]["t"] for e in events[:2]) == "She is stubborn."
     assert events[-1]["data"] == {"notes": "Mira is stubborn."}
-    assert captured == {"label": "notes_fold", "max_tokens": main.NOTES_BUDGET}
+    assert captured == {
+        "label": "notes_fold",
+        "max_tokens": main.NOTES_BUDGET,
+        "temperature": 0.7,
+    }
 
 
 def test_converse_pick_routes_zero_based(monkeypatch):

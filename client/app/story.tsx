@@ -208,8 +208,10 @@ export default function Story() {
     }
 
     // Act on the route AFTER the loop + guard release, so it can safely kick
-    // off the next turn (which re-acquires the same guard).
-    if (routed) {
+    // off the next turn (which re-acquires the same guard). A route captured
+    // just before Stop was pressed must not fire — the user braked, and
+    // handleChoose would otherwise launch a fresh turn behind their back.
+    if (routed && !controller.signal.aborted) {
       if (routed.intent === "pick") handleChoose(options[routed.index]);
       else if (routed.intent === "steer") handleChoose(utterance);
       else if (routed.intent === "options") {

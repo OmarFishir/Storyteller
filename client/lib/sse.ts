@@ -58,17 +58,22 @@ function parseBlock(block: string): StreamEvent | null {
     if (event === "discussion_complete")
       return { type: "discussion_complete", notes: String(payload.notes ?? "") };
     if (event === "route") {
-      if (payload.intent === "pick")
-        return { type: "route", intent: "pick", index: Number(payload.index ?? -1) };
+      if (payload.intent === "pick") {
+        const index = Number(payload.index);
+        if (!Number.isFinite(index) || index < 0)
+          return { type: "stream_error", status: 500, detail: "Malformed stream frame." };
+        return { type: "route", intent: "pick", index };
+      }
       if (payload.intent === "steer") return { type: "route", intent: "steer" };
-      if (payload.intent === "options")
+      if (payload.intent === "options") {
+        if (!Array.isArray(payload.scenarios) || payload.scenarios.length === 0)
+          return { type: "stream_error", status: 500, detail: "Malformed stream frame." };
         return {
           type: "route",
           intent: "options",
-          scenarios: Array.isArray(payload.scenarios)
-            ? payload.scenarios.map(String)
-            : [],
+          scenarios: payload.scenarios.map(String),
         };
+      }
       // A route frame we can't act on is a broken contract, not forward-compat.
       return { type: "stream_error", status: 500, detail: "Malformed stream frame." };
     }

@@ -438,6 +438,35 @@ describe("push-to-talk", () => {
     expect(turnSpy).toHaveBeenCalledTimes(1); // opening turn only
   });
 
+  it("stop pressed before the stream closes suppresses a captured route", async () => {
+    const turnSpy = jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
+    let release: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    jest.spyOn(api, "converse").mockImplementation(
+      () =>
+        (async function* () {
+          yield { type: "route", intent: "steer" } as const;
+          await gate; // stream stays open past the route frame
+        })() as never
+    );
+
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("she walks into the rain"));
+
+    await waitFor(() => getByTestId("stop-button"));
+    fireEvent.press(getByTestId("stop-button"));
+    await act(async () => release!());
+    await waitFor(() =>
+      expect(getByTestId("ptt-button").props.accessibilityState?.disabled).toBe(false)
+    );
+    expect(turnSpy).toHaveBeenCalledTimes(1); // opening turn only — braked route never fired
+  });
+
   it("stop aborts a streaming reply silently and keeps the partial bubble", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
     let capturedSignal: AbortSignal | undefined;
