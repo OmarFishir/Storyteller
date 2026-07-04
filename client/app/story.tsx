@@ -82,6 +82,7 @@ export default function Story() {
     // Guard against overlapping turns (one busy flag shared with runConverse)
     if (streamingRef.current) return;
     streamingRef.current = true;
+    voiceOut.stop(); // a new turn silences whatever scene/reply was narrating
     setIsStreaming(true);
     setStopped(false);
     setPendingConverse(null); // choosing a card or retrying a scene abandons a failed conversation
@@ -141,6 +142,7 @@ export default function Story() {
   async function runConverse(utterance: string, isRetry = false) {
     if (streamingRef.current) return;
     streamingRef.current = true;
+    voiceOut.stop(); // a new turn silences whatever scene/reply was narrating
     setIsStreaming(true);
     setStopped(false);
     setPendingConverse(null);

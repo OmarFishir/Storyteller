@@ -641,6 +641,20 @@ describe("narration", () => {
     );
   });
 
+  it("starting a new turn silences the previous narration", async () => {
+    jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(happyTurn());
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText(/Force the iron door/));
+    mockVoiceOutFake.stop.mockClear();
+    fireEvent.press(getByText("Ask the voice its name"));
+    await waitFor(() =>
+      expect(mockVoiceOutFake.stop).toHaveBeenCalled()
+    );
+  });
+
   it("speaks the reply when a discussion completes", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
     jest.spyOn(api, "converse").mockReturnValueOnce(

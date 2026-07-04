@@ -4,7 +4,11 @@
  * (Gemini TTS via our backend) played through an Audio element. ANY failure
  * downgrades to the device's built-in voice for that utterance — the story
  * is never silent because a quota ran out. Mock mode always uses the device
- * voice: the full loop demos at zero cost.
+ * voice for narration: story + narration demo at zero cost, matching the
+ * backend's own mock stance. STT (the mic, see lib/voice.ts) is NEVER
+ * mocked — it always POSTs a recorded clip to the real /transcribe endpoint
+ * regardless of this flag, so a mic press in mock mode still costs a
+ * fraction of a cent per utterance.
  */
 
 import { API_URL } from "./api";
@@ -75,13 +79,16 @@ export function getVoiceOut(): VoiceOut {
   };
 
   const deviceSpeak = (text: string, gen: number) => {
-    if (!hasDevice || gen !== generation) return;
+    if (gen !== generation) return; // stale generation: don't touch state
+    if (!hasDevice) {
+      setSpeaking(false); // no fallback voice available; pipeline dies here
+      return;
+    }
     const utterance = new g.SpeechSynthesisUtterance!(text);
     utterance.onend = () => {
       if (gen === generation) setSpeaking(false);
     };
     utterance.onerror = utterance.onend;
-    setSpeaking(true);
     g.speechSynthesis!.speak(utterance);
   };
 
@@ -90,6 +97,11 @@ export function getVoiceOut(): VoiceOut {
     speak(text, opts) {
       halt(); // one voice at a time
       const gen = generation;
+      // "Speaking" means the narration PIPELINE is active, not that audio is
+      // physically playing yet — flipped true here, synchronously, so the
+      // "■ Stop" control stays reachable through the multi-second /narrate
+      // fetch instead of only appearing once playback starts.
+      setSpeaking(true);
       if (USE_MOCK || !hasAudio) {
         deviceSpeak(text, gen);
         return;
@@ -122,7 +134,6 @@ export function getVoiceOut(): VoiceOut {
               deviceSpeak(text, gen);
             }
           };
-          setSpeaking(true);
           void audio.play();
         })
         .catch(() => {

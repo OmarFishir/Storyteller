@@ -157,22 +157,34 @@ FastAPI server in `main.py`:
   (~30/sec of speech), so the existing token meter captures STT cost with
   zero schema change. Reuses `call_gemini` end to end, so its whole
   retry/429/empty-response contract applies unchanged. New dep:
-  `python-multipart` (FastAPI needs it to parse multipart/form-data).
+  `python-multipart` (FastAPI needs it to parse multipart/form-data). A
+  sync `def transcribe(...)` (final-review fix — it was the file's only
+  `async def`, and calling the synchronous `call_gemini` directly on the
+  event loop stalled every other in-flight SSE stream for the length of a
+  transcription, retries and all); reads the upload via the sync
+  `audio.file.read()` instead of `await audio.read()`. FastAPI runs sync def
+  endpoints in a threadpool, same as every other route in this file.
 - `POST /narrate` — the audio slice's MOUTH. `{"text": "...", "kind": "scene"
   | "reply"}` → raw `audio/wav` bytes. `call_gemini_tts` calls Gemini's TTS
   path on its own `TTS_MODEL = "gemini-2.5-flash-preview-tts"` constant
   (swap-in-one-place, same philosophy as `MODEL`) with `VOICE_NAME = "charon"`
-  (v1: one narrator voice; per-genre voices are Phase 4) and
-  `TTS_BUDGET=4000` audio tokens (~2.5 min of speech), label `tts`. Mirrors
-  `call_gemini`'s error contract (retry 5xx w/ backoff, clean 429, an
-  empty/missing audio part → 502) — a third copy of the retry block;
+  (v1: one narrator voice; per-genre voices are Phase 4) and a PER-KIND
+  budget, `TTS_BUDGETS = {"scene": 10000, "reply": 2000}` audio tokens
+  (final-review fix: a flat 4000-token budget silently truncated scenes
+  mid-word since scenes run 450-750 words; the scene ceiling now covers
+  ~6-7min of speech, comfortably above the longest scene, while replies stay
+  small), label `tts`. If the model still hits the budget (`finish_reason`
+  ending in `MAX_TOKENS`), a stderr warning is printed
+  (`kind` included) but the request is NOT failed — partial narration beats
+  none. Mirrors `call_gemini`'s error contract (retry 5xx w/ backoff, clean
+  429, an empty/missing audio part → 502) — a third copy of the retry block;
   extraction to a shared helper is queued for the Phase 3 `main.py` split,
   consistency wins until then. `pcm_to_wav` (stdlib `wave`, no new dep) wraps
   the model's raw 16-bit PCM in a WAV container at 24kHz mono — browsers
   can't play bare PCM. `NARRATE_CHAR_CAP=6000` → 413 before any model call
   (scenes are already budget-bounded; this is abuse armor for arbitrary
-  text). `kind` is accepted but not yet used to vary voice/style — a future
-  hook.
+  text). `kind` now selects the TTS budget above (previously accepted but
+  unused).
 - `POST /continue` — `{"template_id": "...", "summary": "...", "chosen_scenario": "...",
   "turn": 1, "length": "short", "notes": ""}` → `{"scene": "...", "summary": "...", "scenarios": [...]}`.
   The running-summary turn — the first cost-control piece actually wired up: the
@@ -305,8 +317,10 @@ reading/export view arrives with persistence in Phase 3. Full design:
 
 Tests in `tests/test_api.py`, `tests/test_templates.py`, `tests/test_beats.py`,
 `tests/test_converse.py`, and `tests/test_audio.py`
-(pytest + FastAPI `TestClient`, **115 tests** — up from 103; the delta is
-`test_audio.py`'s new 12-test suite): health
+(pytest + FastAPI `TestClient`, **117 tests** — up from 115; the delta is
+two final-review additions to `test_audio.py` (now 14 tests, up from 12): a
+per-kind TTS-budget parametrization (scene/reply) and the previously-riding
+`call_gemini_tts` retry-then-succeed test): health
 check; retry-then-succeed
 and retry-exhaustion → 503; 429-without-retry and other-4xx passthrough;
 empty-response → 502; /suggest shape bare and with `template_id` (404 on
@@ -510,7 +524,12 @@ deviation from the original spec's `app/`).
   interrupts any narration playing, so the user is never talking over the
   AI. `isStreaming` (NOT `isSpeaking`) still gates the mic's `disabled`
   prop — you can start talking while a reply/scene narrates, since
-  interrupting it mid-word is the point.
+  interrupting it mid-word is the point. Final-review fix: `runTurn` and
+  `runConverse` now also call `voiceOut.stop()` themselves, right after their
+  shared `streamingRef` guard passes — previously only the Stop button and
+  the mic's `onActivate` silenced narration, so tapping an option card (or a
+  spoken ordinal pick) while scene N was still narrating let it keep talking
+  over scene N+1.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
@@ -584,8 +603,22 @@ deviation from the original spec's `app/`).
   device's built-in voice (`speechSynthesis` + `SpeechSynthesisUtterance`)
   for that utterance — a quota/network failure or a mid-playback `onerror`
   all fall through, so the story is never silent because Gemini TTS ran out.
-  `EXPO_PUBLIC_USE_MOCK=1` always uses the device voice (the full loop demos
-  at zero cost, matching the backend's own mock stance). A monotonic
+  `EXPO_PUBLIC_USE_MOCK=1` always uses the device voice for narration (free,
+  matching the backend's own mock stance for `/continue/stream` and
+  `/converse/stream`). Final-review correction: "mock" does NOT mean the
+  whole loop is free — STT (the mic, `lib/voice.ts`) is NEVER mocked, since
+  transcription quality is the audio slice's whole point. `VoiceIn` v2
+  always POSTs a recorded clip to the real `/transcribe` regardless of this
+  flag, so a mic press in mock mode still costs a fraction of a cent per
+  utterance; only the story-generation and narration legs are free in mock
+  mode. `speak()` also flips `isSpeaking` true SYNCHRONOUSLY, before the
+  `/narrate` fetch resolves (another final-review fix) — "speaking" means
+  the narration PIPELINE is active, not that audio is physically playing,
+  so Story's "■ Stop" control stays reachable through the multi-second TTS
+  generation instead of only appearing once playback starts; every terminal
+  path (stopped, natural end, playback error with no device fallback, fetch
+  failure with no device fallback) still flips it back false, and a stale
+  generation's async work never touches state at all. A monotonic
   `generation` counter bumps on every `speak()`/`stop()` — the stale-async
   guard: a `/narrate` response, blob-URL creation, or `Audio`/
   `SpeechSynthesisUtterance` callback that resolves after a NEWER
@@ -650,10 +683,13 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **96 tests** across 9
-  suites, up from 80 — the delta is a new `lib/__tests__/voiceOut.test.ts`
-  suite plus a rewritten `voice.test.ts` for the v2 record-then-transcribe
-  engine and new narration cases in `story.test.tsx`): `lib/__tests__/sse.test.ts` (frame parsing incl.
+- Tests (jest-expo preset, `restoreMocks: true`, **98 tests** across 9
+  suites, up from 80 (96 before this final-review pass) — the delta is a new
+  `lib/__tests__/voiceOut.test.ts` suite plus a rewritten `voice.test.ts` for
+  the v2 record-then-transcribe engine and new narration cases in
+  `story.test.tsx`, plus two final-review additions: `voiceOut.test.ts`'s
+  speak()-flips-true-before-playback case and `story.test.tsx`'s
+  new-turn-silences-old-narration case): `lib/__tests__/sse.test.ts` (frame parsing incl.
   chunk-split and separator-split cases, malformed JSON, unknown events, and
   — new — `reply_token`/`discussion_complete` parsing plus all three `route`
   intents, with an unrecognized route intent yielding `stream_error` rather
@@ -679,7 +715,11 @@ deviation from the original spec's `app/`).
   on/off, `stop()` halting playback mid-word, a `/narrate` failure falling
   back to the device voice, `stop()` while the fetch is still in flight
   meaning the audio never plays, a second `speak()` superseding the first,
-  and unavailability with no audio capability at all);
+  unavailability with no audio capability at all, and — a final-review
+  addition — `isSpeaking` flipping true SYNCHRONOUSLY at `speak()` time,
+  before the `/narrate` fetch resolves, with a `stop()` in that window
+  correctly staying `[true, false]` and the later-arriving stale response
+  never reviving it);
   `lib/__tests__/matchCard.test.ts` (SLIMMED to ordinals-only: guarded
   ordinals incl. "the last one" and out-of-bounds, bare ordinal words inside
   long sentences NOT matching, pick-verbs unlocking ordinals in longer
@@ -712,8 +752,10 @@ deviation from the original spec's `app/`).
   the "← Home" back control exists; and — NEW for narration — a scene speaks
   when its turn completes, a reply speaks when its discussion completes, the
   "■ Stop" control silences narration too (on top of aborting a stream),
-  holding the mic interrupts any narration playing, and speaking never
-  disables the mic because `isSpeaking` is not `isStreaming`); a
+  holding the mic interrupts any narration playing, speaking never
+  disables the mic because `isSpeaking` is not `isStreaming`, and — a
+  final-review addition — tapping an option card while a previous scene is
+  still narrating calls `voiceOut.stop()`); a
   `resolveStoryLength` unit-test block
   (4 tests) pinning the total fallback to `"short"` for an invalid string, an
   array (duplicated query param), and a missing value. Gemini is never
@@ -762,6 +804,34 @@ deviation from the original spec's `app/`).
   live-verify paragraph); the owner's Chrome mic-and-ear gut-check (speaking
   a real utterance, hearing the Gemini voice, interrupting it) has NOT
   happened yet — that hand-off is what closes this slice for real.
+- Audio final-review hardening (same day, whole-slice review):
+  `/transcribe` was the file's only `async def` and called the synchronous
+  `call_gemini` (blocking I/O, up to 7s of retry sleeps) directly on the
+  event loop, stalling every other in-flight SSE stream during a
+  transcription — now a plain `def transcribe(...)` reading the upload via
+  sync `audio.file.read()`, same as every other route (FastAPI runs it in a
+  threadpool). `call_gemini_tts` gained a `kind` param and per-kind budgets,
+  `TTS_BUDGETS = {"scene": 10000, "reply": 2000}`, replacing a flat
+  4000-token ceiling that silently truncated scenes (450-750 words) mid-word
+  with no signal; a `finish_reason` ending in `MAX_TOKENS` now prints a
+  stderr warning (never fails the request — partial narration beats none).
+  `runTurn`/`runConverse` now call `voiceOut.stop()` themselves right after
+  their `streamingRef` guard passes, so a new turn always silences whatever
+  was narrating (previously only the Stop button and the mic's `onActivate`
+  did). `voiceOut.speak()` now flips `isSpeaking` true SYNCHRONOUSLY — before
+  the `/narrate` fetch resolves, not after playback starts — so the "■ Stop"
+  control stays reachable through the multi-second TTS generation; this also
+  resolves the "theoretical silent-playback edge" riding-minor above: every
+  terminal path (stopped, natural end, playback error / fetch failure with
+  no device fallback) now explicitly flips it back false instead of
+  silently no-opping, and a stale generation's async work still never
+  touches state. Both mock-stance docs (this file and `lib/voiceOut.ts`'s
+  header) now say plainly that mock mode only covers story + narration —
+  STT (the mic, `lib/voice.ts`) always POSTs to the real `/transcribe`
+  regardless of `EXPO_PUBLIC_USE_MOCK`, so a mic press in mock mode still
+  costs a fraction of a cent. Verified: backend 117/117 (`tests/test_audio.py`
+  14 tests, up from 12), client 98/98 across 9 suites (up from 96); `npx tsc
+  --noEmit` clean.
 
 ## Environment / how to run
 

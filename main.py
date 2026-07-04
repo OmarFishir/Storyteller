@@ -809,9 +809,9 @@ MAX_AUDIO_BYTES = 2_000_000  # ~2MB; a PTT clip is seconds, not minutes
 
 
 @app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
+def transcribe(audio: UploadFile = File(...)):
     """Speech-to-text for push-to-talk: one short clip in, its words out."""
-    data = await audio.read()
+    data = audio.file.read()
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(
             status_code=413,
@@ -834,7 +834,9 @@ async def transcribe(audio: UploadFile = File(...)):
 # --- Audio slice: the mouth --------------------------------------------------
 TTS_MODEL = "gemini-2.5-flash-preview-tts"  # swap-in-one-place, like MODEL
 VOICE_NAME = "charon"  # v1: one narrator voice; per-genre voices are Phase 4
-TTS_BUDGET = 4000  # audio tokens ceiling (~25/sec => ~2.5min of speech)
+TTS_BUDGETS = {"scene": 10000, "reply": 2000}  # audio tokens ceiling per kind:
+# scenes run 450-750 words and need room for ~6-7min of speech so narration
+# never cuts off mid-sentence; replies are short discussion turns.
 NARRATE_CHAR_CAP = 6000  # scenes are budget-bounded; this is abuse armor
 
 
@@ -854,12 +856,18 @@ def pcm_to_wav(pcm: bytes, sample_rate: int = 24000) -> bytes:
     return buf.getvalue()
 
 
-def call_gemini_tts(text: str, label: str = "tts") -> bytes:
+def call_gemini_tts(text: str, kind: str = "scene", label: str = "tts") -> bytes:
     """
     ONE TTS request: text in, raw PCM bytes out. Mirrors call_gemini's error
     contract (retry 5xx w/ backoff; clean 429; empty output -> 502) — the
     retry block is now duplicated a third time; extraction is queued for the
     Phase 3 main.py split, consistency wins until then.
+
+    `kind` selects the token budget from TTS_BUDGETS: "scene" gets enough
+    headroom for the longest scenes, "reply" is a smaller flat cap for short
+    discussion turns. If the model still runs out of budget (finish_reason
+    MAX_TOKENS), narration is truncated — that's visible on stderr, but this
+    function never fails the request over it: partial narration beats none.
     """
     delays = [1, 2, 4]
     for attempt in range(len(delays) + 1):
@@ -876,7 +884,7 @@ def call_gemini_tts(text: str, label: str = "tts") -> bytes:
                             )
                         )
                     ),
-                    max_output_tokens=TTS_BUDGET,
+                    max_output_tokens=TTS_BUDGETS[kind],
                 ),
             )
             usage = getattr(response, "usage_metadata", None)
@@ -893,6 +901,14 @@ def call_gemini_tts(text: str, label: str = "tts") -> bytes:
             for part in parts:
                 inline = getattr(part, "inline_data", None)
                 if inline is not None and inline.data:
+                    candidates = getattr(response, "candidates", None)
+                    if candidates and str(
+                        getattr(candidates[0], "finish_reason", "")
+                    ).endswith("MAX_TOKENS"):
+                        print(
+                            f"WARNING: narration truncated by TTS budget (kind={kind})",
+                            file=sys.stderr,
+                        )
                     return inline.data
             raise HTTPException(
                 status_code=502,
@@ -917,7 +933,7 @@ def narrate(req: NarrateRequest):
             status_code=413,
             detail="Narration text too long.",
         )
-    pcm = call_gemini_tts(req.text)
+    pcm = call_gemini_tts(req.text, kind=req.kind)
     return Response(content=pcm_to_wav(pcm), media_type="audio/wav")
 
 

@@ -139,7 +139,11 @@ def test_narrate_missing_text_is_422():
     assert client.post("/narrate", json={"kind": "scene"}).status_code == 422
 
 
-def test_call_gemini_tts_extracts_pcm_and_logs_usage(monkeypatch):
+@pytest.mark.parametrize(
+    "kind, expected_budget",
+    [("scene", main.TTS_BUDGETS["scene"]), ("reply", main.TTS_BUDGETS["reply"])],
+)
+def test_call_gemini_tts_extracts_pcm_and_logs_usage(monkeypatch, kind, expected_budget):
     calls = {}
 
     class FakeUsage:
@@ -152,6 +156,7 @@ def test_call_gemini_tts_extracts_pcm_and_logs_usage(monkeypatch):
         calls["voice"] = (
             config.speech_config.voice_config.prebuilt_voice_config.voice_name
         )
+        calls["max_output_tokens"] = config.max_output_tokens
         return _FakeResponse(b"RAWPCM", usage=FakeUsage())
 
     monkeypatch.setattr(main.client.models, "generate_content", fake_generate)
@@ -162,14 +167,35 @@ def test_call_gemini_tts_extracts_pcm_and_logs_usage(monkeypatch):
         lambda **kw: logged.update(kw),
     )
 
-    pcm = main.call_gemini_tts("Hello there.")
+    pcm = main.call_gemini_tts("Hello there.", kind=kind)
     assert pcm == b"RAWPCM"
     assert calls["model"] == main.TTS_MODEL
     assert calls["voice"] == main.VOICE_NAME
+    assert calls["max_output_tokens"] == expected_budget  # per-kind budget, pinned
     assert "Hello there." in calls["contents"]
     assert logged["label"] == "tts"
     assert logged["input_tokens"] == 12
     assert logged["output_tokens"] == 340
+
+
+def test_call_gemini_tts_retries_server_error_then_succeeds(monkeypatch):
+    """The retry/backoff path (previously untested) rides in with this budget fold."""
+    from google.genai import errors as genai_errors
+
+    calls = {"n": 0}
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise genai_errors.ServerError(503, {"error": {"message": "overloaded"}})
+        return _FakeResponse(b"RAWPCM")
+
+    monkeypatch.setattr(main.client.models, "generate_content", flaky)
+    monkeypatch.setattr(main.time, "sleep", lambda *a: None)
+
+    pcm = main.call_gemini_tts("Hello there.")
+    assert pcm == b"RAWPCM"
+    assert calls["n"] == 2
 
 
 def test_call_gemini_tts_no_audio_part_is_502(monkeypatch):

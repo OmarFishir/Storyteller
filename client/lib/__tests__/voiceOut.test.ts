@@ -72,6 +72,7 @@ describe("getVoiceOut", () => {
     out.onSpeakingChange((s) => states.push(s));
 
     out.speak("The rain fell.", { kind: "scene" });
+    expect(states).toEqual([true]); // pipeline active before playback starts
     await flush();
     await flush();
 
@@ -86,6 +87,23 @@ describe("getVoiceOut", () => {
 
     FakeAudio.instances[0].onended?.();
     expect(states).toEqual([true, false]);
+  });
+
+  it("state flips true at speak() time, before the audio arrives (stop stays reachable)", async () => {
+    let resolveFetch: (v: unknown) => void;
+    jest
+      .spyOn(require("../fetch"), "streamingFetch")
+      .mockReturnValue(new Promise((r) => (resolveFetch = r)) as never);
+    const out = getVoiceOut();
+    const states: boolean[] = [];
+    out.onSpeakingChange((s) => states.push(s));
+    out.speak("Slow narration");
+    expect(states).toEqual([true]); // pipeline active before playback
+    out.stop();
+    expect(states).toEqual([true, false]);
+    resolveFetch!({ ok: true, status: 200, blob: () => Promise.resolve(new Blob(["RIFF"])) });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(states).toEqual([true, false]); // stale narration stays dead
   });
 
   it("stop() halts playback mid-word and flips state off", async () => {
