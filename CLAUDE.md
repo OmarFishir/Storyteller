@@ -263,7 +263,7 @@ FastAPI server in `main.py`:
   strings live in the `DETAIL_MODEL_BUSY` / `DETAIL_QUOTA` constants.
 - `usage_log.log_usage(label, model, input_tokens, output_tokens)` — appends one
   JSON line per Gemini call to `logs/usage.jsonl` (git-ignored). Labels in use:
-  `suggest`, `expand`, `scene`, `fold`. A logging failure is swallowed (it must
+  `suggest`, `expand`, `scene`, `fold`, `converse`, `notes_fold`. A logging failure is swallowed (it must
   never break the request it's measuring) but warns on stderr so a dead meter is
   visible. The whole "dashboard" for now is opening the file.
 
@@ -531,8 +531,8 @@ deviation from the original spec's `app/`).
   under its own `"premise-mic"` testID.
 - **Env config**: `EXPO_PUBLIC_API_URL` (backend base URL — LAN IP, not
   `localhost`, when running on a phone via Expo Go) and `EXPO_PUBLIC_USE_MOCK`
-  (`1` routes `streamTurn` to `/continue/stream?mock=true`, the backend's
-  zero-cost canned stream; needs the backend's own `DEV_MOCK_ENABLED=1`).
+  (`1` routes `streamTurn`/`converse()` to their `?mock=true` endpoints, the
+  backend's zero-cost canned streams; needs the backend's own `DEV_MOCK_ENABLED=1`).
   Template: `client/.env.example` (copy to `client/.env`, git-ignored).
 - **Version pins**: SDK 57 shipped ahead of some peers, so
   `@testing-library/react-native` is pinned to exact `13.3.3` and
