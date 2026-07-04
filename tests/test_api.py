@@ -690,6 +690,63 @@ def test_scene_prompt_epilogue_past_the_arc():
     assert "Epilogue" in main.build_scene_prompt(main.TEMPLATES["noir"], req)
 
 
+def test_scene_prompt_slots_notes_between_beat_and_summary():
+    req = main.ContinueRequest(
+        template_id="noir",
+        summary="The detective has the envelope.",
+        chosen_scenario="Open it now.",
+        turn=1,
+        length="short",
+        notes="The mayor's aide is secretly his sister.",
+    )
+    template = main.TEMPLATES["noir"]
+    prompt = main.build_scene_prompt(template, req)
+
+    i_notes = prompt.index("The mayor's aide is secretly his sister.")
+    i_summary = prompt.index("The detective has the envelope.")
+    i_beat = prompt.index("Current story beat:")
+    assert i_beat < i_notes < i_summary
+    assert "Established story notes (canon):" in prompt
+
+
+def test_scene_prompt_without_notes_is_unchanged_from_today():
+    kwargs = dict(
+        template_id="noir",
+        summary="s",
+        chosen_scenario="c",
+        turn=1,
+        length="short",
+    )
+    template = main.TEMPLATES["noir"]
+    with_default = main.build_scene_prompt(template, main.ContinueRequest(**kwargs))
+    explicit_empty = main.build_scene_prompt(
+        template, main.ContinueRequest(**kwargs, notes="")
+    )
+    assert with_default == explicit_empty
+    assert "story notes" not in with_default  # no empty block injected
+
+
+def test_stream_turn_accepts_and_uses_notes(monkeypatch):
+    captured = {}
+
+    def fake_stream(contents, **kwargs):
+        captured["prompt"] = contents
+        yield "scene text"
+
+    monkeypatch.setattr(main, "call_gemini_stream", fake_stream)
+    monkeypatch.setattr(
+        main,
+        "call_gemini",
+        lambda contents, **kw: '{"summary": "s", "scenarios": ["a", "b", "c"]}',
+    )
+
+    resp = client.post(
+        "/continue/stream", json=dict(CONTINUE_BODY, notes="Mira fears fire.")
+    )
+    assert resp.status_code == 200
+    assert "Mira fears fire." in captured["prompt"]
+
+
 def test_fold_prompt_steers_toward_next_beat_and_scales_summary():
     # Options generated at turn t are consumed at turn t+1 — steer toward
     # THAT turn's current beat, not the structurally-next beat. Long noir,

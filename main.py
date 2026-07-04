@@ -97,6 +97,7 @@ class ContinueRequest(BaseModel):
     chosen_scenario: str
     turn: int = Field(1, ge=1)
     length: Literal["short", "medium", "long"] = "short"
+    notes: str = ""  # canon from the discussion channel; empty = pre-converse behavior
 
 
 class DiscussionEntry(BaseModel):
@@ -230,14 +231,17 @@ NOTES_WORDS = 120
 
 
 def build_scene_prompt(template: dict, req: ContinueRequest) -> str:
-    """Assemble the storyteller prompt: static -> style -> beat -> dynamic."""
+    """Assemble the storyteller prompt: static -> style -> beat -> notes -> dynamic."""
     beats = story_beats.select_beats(template.get("structure"), req.turn, req.length)
     beat_block = ""
     if beats:
         current, _ = beats
         beat_block = f"\n\nCurrent story beat: {current['name']} — {current['guidance']}"
+    notes_block = (
+        f"\n\nEstablished story notes (canon):\n{req.notes}" if req.notes else ""
+    )
     return (
-        f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}{beat_block}\n\n"
+        f"{STORY_PROMPT}\n\nGenre style:\n{template['style']}{beat_block}{notes_block}\n\n"
         f"Story so far:\n{req.summary}\n\n"
         f"Chosen direction:\n{req.chosen_scenario}"
     )
