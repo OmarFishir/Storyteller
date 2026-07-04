@@ -33,8 +33,11 @@ export function PushToTalk({
   }
   const voice = voiceRef.current;
 
-  const [interim, setInterim] = useState("");
+  const [phase, setPhase] = useState<"idle" | "listening" | "transcribing">(
+    "idle"
+  );
   const [error, setError] = useState<string | null>(null);
+  const phaseTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Unmount cleanup: abort any in-flight recognition session so it doesn't
   // outlive the component (mic hot on a dead screen) and so a late onFinal
@@ -43,6 +46,7 @@ export function PushToTalk({
   useEffect(() => {
     return () => {
       voice.abort();
+      if (phaseTimeout.current) clearTimeout(phaseTimeout.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -51,24 +55,38 @@ export function PushToTalk({
 
   const handlePressIn = () => {
     setError(null);
-    setInterim("");
+    setPhase("listening");
     voice.start({
-      onInterim: (transcript) => setInterim(transcript),
+      onInterim: () => {},
       onFinal: (transcript) => {
-        setInterim("");
+        if (phaseTimeout.current) clearTimeout(phaseTimeout.current);
+        setPhase("idle");
         if (transcript.trim().length > 0) onUtterance(transcript);
       },
-      onError: (message) => setError(message),
+      onError: (message) => {
+        if (phaseTimeout.current) clearTimeout(phaseTimeout.current);
+        setPhase("idle");
+        setError(message);
+      },
     });
   };
 
   const handlePressOut = () => {
+    setPhase("transcribing");
     voice.stop();
+    // Guard against a stuck "transcribing…" if the clip was empty (no
+    // callback fires in that case).
+    if (phaseTimeout.current) clearTimeout(phaseTimeout.current);
+    phaseTimeout.current = setTimeout(() => setPhase("idle"), 8000);
   };
 
   return (
     <View style={compact ? styles.containerCompact : styles.container}>
-      {interim.length > 0 && <Text style={styles.interim}>{interim}</Text>}
+      {phase !== "idle" && (
+        <Text style={styles.interim}>
+          {phase === "listening" ? "listening…" : "…"}
+        </Text>
+      )}
       {error && <Text style={styles.error}>{error}</Text>}
       <Pressable
         testID={testID}
