@@ -226,5 +226,23 @@ describe("getVoiceOut", () => {
       expect(FakeAudio.instances).toHaveLength(1); // reused, not re-minted
       expect(FakeAudio.instances[0].paused).toBe(false);
     });
+
+    it("never hijacks a live narration to bless (post-rejection retry during playback)", async () => {
+      FakeAudio.playResult = Promise.reject(new Error("NotAllowedError"));
+      const out = getVoiceOut();
+      out.unlock(); // rejected: unlocked resets, element parked
+      await flush();
+      FakeAudio.playResult = Promise.resolve();
+      jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(okWav());
+      out.speak("Live narration");
+      await flush();
+      await flush();
+      const el = FakeAudio.instances[0];
+      expect(el.paused).toBe(false); // narration is playing
+      out.unlock(); // retry lands mid-playback: must be a no-op
+      expect(el.src).toBe("blob:fake"); // narration NOT hijacked
+      expect(el.muted).toBe(false);
+      expect(el.playCalls).toHaveLength(2); // silent attempt + narration only
+    });
   });
 });

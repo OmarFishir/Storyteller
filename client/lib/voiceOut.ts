@@ -137,6 +137,7 @@ export function getVoiceOut(): VoiceOut {
       if (unlocked) return;
       const el = ensureAudio();
       if (!el) return;
+      if (!el.paused) return; // never hijack live playback for a bless
       unlocked = true;
       el.muted = true;
       el.src = SILENT_WAV;
@@ -152,7 +153,10 @@ export function getVoiceOut(): VoiceOut {
           // No gesture context: nothing was blessed. Swallowed on purpose —
           // the next tap's unlock() retries.
           unlocked = false;
-          if (el.src === SILENT_WAV) el.muted = false;
+          if (el.src === SILENT_WAV) {
+            el.pause(); // a rejected play never started; park the element again
+            el.muted = false;
+          }
         }
       );
     },
