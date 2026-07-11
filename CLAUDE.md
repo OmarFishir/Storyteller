@@ -683,7 +683,7 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **116 tests** across 10
+- Tests (jest-expo preset, `restoreMocks: true`, **118 tests** across 10
   suites, up from 98 across 9 — the phone-preview slice's delta: a new
   `components/__tests__/PushToTalk.test.tsx` suite pinning the 8s/15s
   stuck-phase-timeout boundary, plus new `unlock()` / autoplay-rejection /
@@ -916,7 +916,7 @@ deviation from the original spec's `app/`).
   changes for this slice — iOS 18.4+'s `MediaRecorder` already records
   `webm/opus`, the same container Chrome sends, confirmed against WebKit's
   release notes at design time rather than assumed. Suite counts: backend
-  117 (untouched), client 116 across 10 suites (up from 98/9); `npx tsc
+  117 (untouched), client 118 across 10 suites (up from 98/9); `npx tsc
   --noEmit` and `npx expo export --platform web` both clean.
 
 ## Environment / how to run
