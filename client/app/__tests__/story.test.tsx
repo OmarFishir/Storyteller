@@ -32,6 +32,7 @@ const mockVoiceOutFake = {
   available: true,
   speak: jest.fn(),
   stop: jest.fn(),
+  unlock: jest.fn(),
   onSpeakingChange: jest.fn(),
 };
 jest.mock("../../lib/voiceOut", () => ({
@@ -41,6 +42,7 @@ jest.mock("../../lib/voiceOut", () => ({
 beforeEach(() => {
   mockVoiceOutFake.speak.mockClear();
   mockVoiceOutFake.stop.mockClear();
+  mockVoiceOutFake.unlock.mockClear();
   // Also cleared (beyond the brief's two lines): onSpeakingChange is a plain
   // jest.fn(), so its call history otherwise accumulates across tests in this
   // file (restoreMocks only restores jest.spyOn spies) — an uncleared history
@@ -268,6 +270,25 @@ describe("Story", () => {
     unmount();
     expect(capturedSignal?.aborted).toBe(true);
     release!();
+  });
+
+  it("tapping an option card blesses audio for iOS before the turn runs", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
+    const { getByText } = render(<Story />);
+    await waitFor(() => getByText("Force the iron door open now"));
+    mockVoiceOutFake.unlock.mockClear();
+    jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
+    fireEvent.press(getByText("Force the iron door open now"));
+    expect(mockVoiceOutFake.unlock).toHaveBeenCalled();
+  });
+
+  it("pressing the mic blesses audio for iOS", async () => {
+    jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
+    const { getByText, getByTestId } = render(<Story />);
+    await waitFor(() => getByText("Force the iron door open now"));
+    mockVoiceOutFake.unlock.mockClear();
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    expect(mockVoiceOutFake.unlock).toHaveBeenCalled();
   });
 });
 

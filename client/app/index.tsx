@@ -10,6 +10,7 @@ import {
 import { router } from "expo-router";
 import { getTemplates, StoryLength, Template } from "../lib/api";
 import { PushToTalk } from "../components/PushToTalk";
+import { getVoiceOut } from "../lib/voiceOut";
 
 type LoadState = "loading" | "error" | "ready";
 
@@ -45,6 +46,8 @@ export default function Home() {
 
   const beginStory = () => {
     if (!selected || !canBegin) return;
+    // A real tap: bless iOS audio now so the opening scene can auto-narrate.
+    getVoiceOut().unlock();
     router.push({
       pathname: "/story",
       params: { templateId: selected.id, premise, length },
@@ -99,6 +102,7 @@ export default function Home() {
               testID="premise-mic"
               compact
               onUtterance={setPremise}
+              onActivate={() => getVoiceOut().unlock()}
             />
           </View>
           <View style={styles.chipRow}>

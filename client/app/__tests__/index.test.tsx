@@ -19,12 +19,27 @@ jest.mock("../../lib/voice", () => ({
   getVoiceIn: () => mockVoiceFake,
 }));
 
+const mockVoiceOutFake = {
+  available: true,
+  speak: jest.fn(),
+  stop: jest.fn(),
+  unlock: jest.fn(),
+  onSpeakingChange: jest.fn(),
+};
+jest.mock("../../lib/voiceOut", () => ({
+  getVoiceOut: () => mockVoiceOutFake,
+}));
+
 const TEMPLATES = [
   { id: "fantasy", name: "Fantasy Adventure", description: "d1", premise_seeds: ["A dragon egg hatches."] },
   { id: "noir", name: "Mystery / Noir", description: "d2", premise_seeds: ["One last case."] },
 ];
 
 describe("Home", () => {
+  beforeEach(() => {
+    mockVoiceOutFake.unlock.mockClear();
+  });
+
   it("renders a card per template", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
     const { getByText } = render(<Home />);
@@ -76,5 +91,24 @@ describe("Home", () => {
     expect(getByPlaceholderText(/premise/i).props.value).toBe(
       "a dragon egg hatches in a city without magic"
     );
+  });
+
+  it("Begin the story blesses audio for iOS (the session's first tap)", async () => {
+    jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
+    const { getByText, getByPlaceholderText } = render(<Home />);
+    await waitFor(() => getByText("Fantasy Adventure"));
+    fireEvent.press(getByText("Fantasy Adventure"));
+    fireEvent.changeText(getByPlaceholderText(/premise/i), "a premise");
+    fireEvent.press(getByText(/begin the story/i));
+    expect(mockVoiceOutFake.unlock).toHaveBeenCalled();
+  });
+
+  it("pressing the premise mic blesses audio for iOS", async () => {
+    jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
+    const { getByText, getByTestId } = render(<Home />);
+    await waitFor(() => getByText("Fantasy Adventure"));
+    fireEvent.press(getByText("Fantasy Adventure"));
+    fireEvent(getByTestId("premise-mic"), "pressIn");
+    expect(mockVoiceOutFake.unlock).toHaveBeenCalled();
   });
 });

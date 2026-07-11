@@ -330,7 +330,10 @@ export default function Story() {
               {item.options.map((option) => (
                 <Pressable
                   key={option}
-                  onPress={() => handleChoose(option)}
+                  onPress={() => {
+                    voiceOut.unlock(); // a real tap: bless iOS audio before narration needs it
+                    handleChoose(option);
+                  }}
                   style={styles.card}
                 >
                   <Text style={styles.cardTitle}>{option}</Text>
@@ -382,7 +385,10 @@ export default function Story() {
           </Pressable>
         )}
         <PushToTalk
-          onActivate={() => voiceOut.stop()}
+          onActivate={() => {
+            voiceOut.unlock(); // a real tap: bless iOS audio
+            voiceOut.stop();
+          }}
           disabled={isStreaming}
           onUtterance={handleUtterance}
         />
