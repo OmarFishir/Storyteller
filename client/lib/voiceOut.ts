@@ -41,6 +41,11 @@ const USE_MOCK = process.env.EXPO_PUBLIC_USE_MOCK === "1";
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQQAAAAAAA==";
 
+// How long the device-voice fallback waits before checking the engine
+// actually started — iOS drops a gesture-less speechSynthesis.speak() with
+// NO event at all.
+const SYNTH_WATCHDOG_MS = 1500;
+
 type AudioEl = {
   src: string;
   muted: boolean;
@@ -124,11 +129,21 @@ export function getVoiceOut(): VoiceOut {
       return;
     }
     const utterance = new g.SpeechSynthesisUtterance!(text);
+    let settled = false;
     utterance.onend = () => {
+      settled = true;
       if (gen === generation) setSpeaking(false);
     };
     utterance.onerror = utterance.onend;
     g.speechSynthesis!.speak(utterance);
+    // iOS drops a gesture-less speak() with NO event at all. If the engine
+    // explicitly reports it is not speaking shortly after, flip the pipeline
+    // off so the UI can't hang in "speaking". Only an explicit false counts —
+    // an engine without a .speaking property gets the benefit of the doubt.
+    setTimeout(() => {
+      if (settled || gen !== generation || !g.speechSynthesis) return;
+      if (g.speechSynthesis.speaking === false) setSpeaking(false);
+    }, SYNTH_WATCHDOG_MS);
   };
 
   return {

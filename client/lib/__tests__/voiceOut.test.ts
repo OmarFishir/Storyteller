@@ -272,4 +272,77 @@ describe("getVoiceOut", () => {
       expect(el.playCalls).toHaveLength(2); // silent attempt + narration only
     });
   });
+
+  describe("speechSynthesis watchdog", () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+    afterEach(() => {
+      jest.runOnlyPendingTimers();
+      jest.useRealTimers();
+    });
+
+    const failNarrate = () =>
+      jest
+        .spyOn(require("../fetch"), "streamingFetch")
+        .mockResolvedValue({ ok: false, status: 429, json: () => Promise.resolve({}) } as never);
+
+    it("flips speaking false when the engine never starts (iOS silent drop)", async () => {
+      failNarrate();
+      mockSpeechSynthesis.speaking = false;
+      const out = getVoiceOut();
+      const states: boolean[] = [];
+      out.onSpeakingChange((s) => states.push(s));
+      out.speak("Dropped utterance");
+      await jest.advanceTimersByTimeAsync(0); // let the failed fetch resolve
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockSpeechSynthesis.speak).toHaveBeenCalled(); // fallback attempted
+      await jest.advanceTimersByTimeAsync(1500);
+      expect(states).toEqual([true, false]);
+    });
+
+    it("does not fire while the engine IS speaking", async () => {
+      failNarrate();
+      mockSpeechSynthesis.speaking = true;
+      const out = getVoiceOut();
+      const states: boolean[] = [];
+      out.onSpeakingChange((s) => states.push(s));
+      out.speak("Long device narration");
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(1500);
+      expect(states).toEqual([true]); // still narrating, untouched
+    });
+
+    it("an engine without a .speaking property is left alone", async () => {
+      failNarrate();
+      mockSpeechSynthesis.speaking = undefined; // older stub engines
+      const out = getVoiceOut();
+      const states: boolean[] = [];
+      out.onSpeakingChange((s) => states.push(s));
+      out.speak("Unknown engine");
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(1500);
+      expect(states).toEqual([true]); // only an explicit false may flip it
+    });
+
+    it("a stale watchdog can't kill a newer utterance", async () => {
+      failNarrate();
+      mockSpeechSynthesis.speaking = true; // engine looks healthy for both
+      const out = getVoiceOut();
+      const states: boolean[] = [];
+      out.onSpeakingChange((s) => states.push(s));
+      out.speak("First");
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(700);
+      out.speak("Second"); // bumps the generation; halt() → false, then true
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(0);
+      mockSpeechSynthesis.speaking = false; // even if the engine went quiet...
+      await jest.advanceTimersByTimeAsync(800); // ...First's watchdog fires now
+      expect(states).toEqual([true, false, true]); // and must not touch Second
+    });
+  });
 });
