@@ -1,17 +1,24 @@
-import { getVoiceOut } from "../voiceOut";
+import { getVoiceOut, __resetVoiceOutForTests } from "../voiceOut";
 
 // --- fakes -------------------------------------------------------------------
 class FakeAudio {
   static instances: FakeAudio[] = [];
+  // Next play() returns this — set a rejected promise to simulate iOS
+  // autoplay policy. Reset to resolved in beforeEach.
+  static playResult: Promise<void> = Promise.resolve();
+  src = "";
+  muted = false;
   paused = true;
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
-  constructor(public src: string) {
+  playCalls: Array<{ src: string; muted: boolean }> = [];
+  constructor() {
     FakeAudio.instances.push(this);
   }
   play() {
     this.paused = false;
-    return Promise.resolve();
+    this.playCalls.push({ src: this.src, muted: this.muted });
+    return FakeAudio.playResult;
   }
   pause() {
     this.paused = true;
@@ -21,6 +28,7 @@ class FakeAudio {
 const mockSpeechSynthesis = {
   speak: jest.fn(),
   cancel: jest.fn(),
+  speaking: undefined as boolean | undefined,
 };
 
 class FakeUtterance {
@@ -56,6 +64,9 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("getVoiceOut", () => {
   beforeEach(() => {
+    FakeAudio.playResult = Promise.resolve();
+    mockSpeechSynthesis.speaking = undefined;
+    __resetVoiceOutForTests();
     FakeAudio.instances = [];
     mockSpeechSynthesis.speak.mockClear();
     mockSpeechSynthesis.cancel.mockClear();
@@ -145,7 +156,7 @@ describe("getVoiceOut", () => {
     expect(FakeAudio.instances).toHaveLength(0); // stale narration discarded
   });
 
-  it("a second speak() supersedes the first", async () => {
+  it("a second speak() supersedes the first on the same shared element", async () => {
     jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(okWav());
     const out = getVoiceOut();
     out.speak("First");
@@ -154,13 +165,66 @@ describe("getVoiceOut", () => {
     out.speak("Second");
     await flush();
     await flush();
-    expect(FakeAudio.instances[0].paused).toBe(true); // first halted
-    expect(FakeAudio.instances[1].paused).toBe(false);
+    expect(FakeAudio.instances).toHaveLength(1); // ONE element, reused
+    expect(FakeAudio.instances[0].playCalls).toHaveLength(2);
+    expect(FakeAudio.instances[0].paused).toBe(false); // second is live
   });
 
   it("unavailable without any audio capability", () => {
     cleanupAudioGlobals();
     expect(getVoiceOut().available).toBe(false);
     installAudioGlobals(); // for afterEach symmetry
+  });
+
+  describe("unlock()", () => {
+    it("blesses the shared element with a muted silent play inside the tap", async () => {
+      const out = getVoiceOut();
+      out.unlock();
+      expect(FakeAudio.instances).toHaveLength(1);
+      const el = FakeAudio.instances[0];
+      expect(el.playCalls).toEqual([
+        { src: expect.stringContaining("data:audio/wav"), muted: true },
+      ]);
+      await flush();
+      expect(el.paused).toBe(true); // parked again once the bless landed
+      expect(el.muted).toBe(false); // ready for real narration
+    });
+
+    it("is idempotent — a second unlock() doesn't play again", () => {
+      const out = getVoiceOut();
+      out.unlock();
+      out.unlock();
+      expect(FakeAudio.instances[0].playCalls).toHaveLength(1);
+    });
+
+    it("swallows a no-gesture rejection and retries on the next call", async () => {
+      FakeAudio.playResult = Promise.reject(new Error("NotAllowedError"));
+      const out = getVoiceOut();
+      out.unlock();
+      await flush();
+      FakeAudio.playResult = Promise.resolve();
+      out.unlock(); // the failed bless didn't stick — this must try again
+      expect(FakeAudio.instances[0].playCalls).toHaveLength(2);
+    });
+
+    it("no-ops without an Audio global (device-voice-only browsers)", () => {
+      cleanupAudioGlobals();
+      const g = globalThis as never as Record<string, unknown>;
+      g.speechSynthesis = mockSpeechSynthesis;
+      g.SpeechSynthesisUtterance = FakeUtterance;
+      expect(() => getVoiceOut().unlock()).not.toThrow();
+      installAudioGlobals(); // afterEach symmetry
+    });
+
+    it("the bless survives across getVoiceOut() instances (Home taps, Story plays)", async () => {
+      getVoiceOut().unlock(); // Home's Begin button
+      await flush();
+      jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(okWav());
+      getVoiceOut().speak("Scene one."); // Story narrates via a FRESH instance
+      await flush();
+      await flush();
+      expect(FakeAudio.instances).toHaveLength(1); // reused, not re-minted
+      expect(FakeAudio.instances[0].paused).toBe(false);
+    });
   });
 });

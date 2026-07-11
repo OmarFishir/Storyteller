@@ -1,14 +1,22 @@
 /**
  * VoiceOut — the narrator abstraction (architecture rule #3's twin; rule #2:
  * playback is ALWAYS stoppable mid-word). Primary engine: POST /narrate
- * (Gemini TTS via our backend) played through an Audio element. ANY failure
- * downgrades to the device's built-in voice for that utterance — the story
- * is never silent because a quota ran out. Mock mode always uses the device
- * voice for narration: story + narration demo at zero cost, matching the
- * backend's own mock stance. STT (the mic, see lib/voice.ts) is NEVER
- * mocked — it always POSTs a recorded clip to the real /transcribe endpoint
- * regardless of this flag, so a mic press in mock mode still costs a
- * fraction of a cent per utterance.
+ * (Gemini TTS via our backend) played through ONE persistent Audio element.
+ * ANY failure downgrades to the device's built-in voice for that utterance —
+ * the story is never silent because a quota ran out. Mock mode always uses
+ * the device voice for narration: story + narration demo at zero cost,
+ * matching the backend's own mock stance. STT (the mic, see lib/voice.ts) is
+ * NEVER mocked — it always POSTs a recorded clip to the real /transcribe
+ * endpoint regardless of this flag, so a mic press in mock mode still costs
+ * a fraction of a cent per utterance.
+ *
+ * iOS Safari only allows sound that traces back to a real tap, and it
+ * blesses INDIVIDUAL media elements once played during a user gesture. So:
+ * one element for the whole page load, blessed by unlock() (call it
+ * synchronously from any tap handler), src-swapped per utterance. The
+ * element and its bless live at MODULE scope — getVoiceOut() builds fresh
+ * closures per call, and a per-call element would lose the bless between
+ * Home (where the first tap happens) and Story (where narration plays).
  */
 
 import { API_URL } from "./api";
@@ -18,20 +26,38 @@ export type VoiceOut = {
   available: boolean;
   speak: (text: string, opts?: { kind?: "scene" | "reply" }) => void;
   stop: () => void;
+  /** Bless the shared audio element for iOS autoplay. Call synchronously
+   * from a real tap handler. Idempotent; harmless where not needed; its own
+   * play() rejection (a no-gesture call) is swallowed and simply doesn't
+   * bless — the next tap retries. */
+  unlock: () => void;
   onSpeakingChange: (cb: (speaking: boolean) => void) => void;
 };
 
 const USE_MOCK = process.env.EXPO_PUBLIC_USE_MOCK === "1";
 
+// A minimal valid WAV (PCM mono, two silent samples) as a data URI — what
+// unlock() plays, muted, to bless the shared element inside a tap handler.
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQQAAAAAAA==";
+
+type AudioEl = {
+  src: string;
+  muted: boolean;
+  paused: boolean;
+  onended: (() => void) | null;
+  onerror: (() => void) | null;
+  play: () => Promise<void> | void;
+  pause: () => void;
+};
+
 type AudioGlobals = {
-  Audio?: new (src: string) => {
-    paused: boolean;
-    onended: (() => void) | null;
-    onerror: (() => void) | null;
-    play: () => Promise<void> | void;
-    pause: () => void;
+  Audio?: new () => AudioEl;
+  speechSynthesis?: {
+    speak: (u: unknown) => void;
+    cancel: () => void;
+    speaking?: boolean;
   };
-  speechSynthesis?: { speak: (u: unknown) => void; cancel: () => void };
   SpeechSynthesisUtterance?: new (text: string) => {
     onend: (() => void) | null;
     onerror: (() => void) | null;
@@ -39,10 +65,21 @@ type AudioGlobals = {
   URL?: { createObjectURL: (b: Blob) => string; revokeObjectURL: (u: string) => void };
 };
 
+// Module scope on purpose — see the header comment.
+let sharedAudio: AudioEl | null = null;
+let unlocked = false;
+
+/** Test-only: forget the shared element and its bless between tests. */
+export function __resetVoiceOutForTests() {
+  sharedAudio = null;
+  unlocked = false;
+}
+
 const UNAVAILABLE: VoiceOut = {
   available: false,
   speak: () => {},
   stop: () => {},
+  unlock: () => {},
   onSpeakingChange: () => {},
 };
 
@@ -55,8 +92,13 @@ export function getVoiceOut(): VoiceOut {
   let speakingCb: (speaking: boolean) => void = () => {};
   let speaking = false;
   let generation = 0; // bumped on every speak/stop: stale async work no-ops
-  let currentAudio: InstanceType<NonNullable<AudioGlobals["Audio"]>> | null = null;
   let currentUrl: string | null = null;
+
+  const ensureAudio = (): AudioEl | null => {
+    if (!hasAudio) return null;
+    if (!sharedAudio) sharedAudio = new g.Audio!();
+    return sharedAudio;
+  };
 
   const setSpeaking = (s: boolean) => {
     if (speaking === s) return;
@@ -66,10 +108,7 @@ export function getVoiceOut(): VoiceOut {
 
   const halt = () => {
     generation += 1;
-    if (currentAudio) {
-      currentAudio.pause();
-      currentAudio = null;
-    }
+    sharedAudio?.pause();
     if (currentUrl && g.URL) {
       g.URL.revokeObjectURL(currentUrl);
       currentUrl = null;
@@ -94,6 +133,29 @@ export function getVoiceOut(): VoiceOut {
 
   return {
     available: true,
+    unlock() {
+      if (unlocked) return;
+      const el = ensureAudio();
+      if (!el) return;
+      unlocked = true;
+      el.muted = true;
+      el.src = SILENT_WAV;
+      Promise.resolve(el.play()).then(
+        () => {
+          // Don't pause a real narration that started while this resolved.
+          if (el.src === SILENT_WAV) {
+            el.pause();
+            el.muted = false;
+          }
+        },
+        () => {
+          // No gesture context: nothing was blessed. Swallowed on purpose —
+          // the next tap's unlock() retries.
+          unlocked = false;
+          if (el.src === SILENT_WAV) el.muted = false;
+        }
+      );
+    },
     speak(text, opts) {
       halt(); // one voice at a time
       const gen = generation;
@@ -119,20 +181,15 @@ export function getVoiceOut(): VoiceOut {
           }
           const blob = await res.blob();
           if (gen !== generation) return;
+          const audio = ensureAudio()!; // hasAudio guaranteed on this path
           currentUrl = g.URL!.createObjectURL(blob);
-          const audio = new g.Audio!(currentUrl);
-          currentAudio = audio;
+          audio.muted = false;
+          audio.src = currentUrl;
           audio.onended = () => {
-            if (gen === generation) {
-              currentAudio = null;
-              setSpeaking(false);
-            }
+            if (gen === generation) setSpeaking(false);
           };
           audio.onerror = () => {
-            if (gen === generation) {
-              currentAudio = null;
-              deviceSpeak(text, gen);
-            }
+            if (gen === generation) deviceSpeak(text, gen);
           };
           void audio.play();
         })
