@@ -1,21 +1,17 @@
 import { render, fireEvent, waitFor, act } from "@testing-library/react-native";
-import Story, { resolveStoryLength } from "../story";
+import Write, { resolveStoryLength } from "../story/[id]/write";
+import { StoriesProvider, StoryRecord } from "../../lib/store";
 import * as api from "../../lib/api";
 import type { StreamEvent } from "../../lib/sse";
 
 jest.mock("expo-router", () => ({
-  useLocalSearchParams: () => ({
-    templateId: "fantasy",
-    premise: "A dragon egg hatches.",
-    length: "short",
-  }),
-  router: { back: jest.fn() },
+  useLocalSearchParams: () => ({ id: "s1" }),
+  router: { back: jest.fn(), replace: jest.fn(), push: jest.fn() },
 }));
 
 // --- voice fake: capture callbacks so tests can drive recognition ---
 // (named with a "mock" prefix so Jest's babel hoisting allows referencing it
-// from inside the jest.mock factory below — bare "voiceFake" throws
-// "Invalid variable access" under out-of-scope-variable hoisting rules.)
+// from inside the jest.mock factory below.)
 const mockVoiceFake = {
   available: true,
   start: jest.fn(),
@@ -26,8 +22,6 @@ jest.mock("../../lib/voice", () => ({
   getVoiceIn: () => mockVoiceFake,
 }));
 
-// --- voiceOut fake: capture narration calls (mock-prefixed for the same
-// hoisting reason as mockVoiceFake above). ---
 const mockVoiceOutFake = {
   available: true,
   speak: jest.fn(),
@@ -43,12 +37,6 @@ beforeEach(() => {
   mockVoiceOutFake.speak.mockClear();
   mockVoiceOutFake.stop.mockClear();
   mockVoiceOutFake.unlock.mockClear();
-  // Also cleared (beyond the brief's two lines): onSpeakingChange is a plain
-  // jest.fn(), so its call history otherwise accumulates across tests in this
-  // file (restoreMocks only restores jest.spyOn spies) — an uncleared history
-  // makes `mock.calls[0][0]` in the "isSpeaking" test grab a stale callback
-  // from an earlier, already-unmounted Story instance instead of the current
-  // render's.
   mockVoiceOutFake.onSpeakingChange.mockClear();
 });
 
@@ -70,7 +58,35 @@ const happyTurn = () =>
     },
   ]);
 
-describe("Story", () => {
+const freshStory = (over: Partial<StoryRecord> = {}): StoryRecord => ({
+  id: "s1",
+  title: "A dragon egg hatches.",
+  templateId: "fantasy",
+  premise: "A dragon egg hatches.",
+  length: "short",
+  scenes: [],
+  summary: "A dragon egg hatches.",
+  notes: "",
+  options: [],
+  feed: [],
+  discussion: [],
+  topicChats: { characters: [], environment: [], history: [] },
+  bible: null,
+  createdAt: 1,
+  updatedAt: 1,
+  ...over,
+});
+
+// Every test renders the write page over a seeded store — the same shape the
+// real app gets after Home's createStory().
+const renderWrite = (story: StoryRecord = freshStory()) =>
+  render(
+    <StoriesProvider initialStories={[story]}>
+      <Write />
+    </StoriesProvider>
+  );
+
+describe("Write", () => {
   it("streams the opening scene and then shows option cards", async () => {
     const spy = jest.spyOn(api, "streamTurn").mockReturnValue(
       fixtureStream([
@@ -80,7 +96,7 @@ describe("Story", () => {
       ])
     );
 
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => expect(getByText(/cracked/)).toBeTruthy());
     expect(getByText("Go north")).toBeTruthy();
     expect(getByText("Go south")).toBeTruthy();
@@ -95,6 +111,24 @@ describe("Story", () => {
       },
       expect.anything()
     );
+  });
+
+  it("REOPENING a story renders its feed without running a turn", async () => {
+    const spy = jest.spyOn(api, "streamTurn");
+    const { getByText } = renderWrite(
+      freshStory({
+        scenes: ["An old scene, safely kept."],
+        summary: "kept-sum",
+        feed: [
+          { kind: "scene", text: "An old scene, safely kept." },
+          { kind: "cards", options: ["Carry on"] },
+        ],
+        options: ["Carry on"],
+      })
+    );
+    expect(getByText(/An old scene, safely kept/)).toBeTruthy();
+    expect(getByText("Carry on")).toBeTruthy();
+    expect(spy).not.toHaveBeenCalled(); // navigation can never lose or restart a story
   });
 
   it("tapping an option runs the next turn with the updated summary", async () => {
@@ -113,7 +147,7 @@ describe("Story", () => {
         ])
       );
 
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText("Option A"));
     fireEvent.press(getByText("Option A"));
     await waitFor(() => getByText("Option B"));
@@ -140,7 +174,7 @@ describe("Story", () => {
       ])
     );
 
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => expect(getByText(/muse is busy/i)).toBeTruthy());
     expect(getByText(/Half a scene/)).toBeTruthy(); // partial text preserved
   });
@@ -149,7 +183,7 @@ describe("Story", () => {
     jest.spyOn(api, "streamTurn").mockReturnValue(
       fixtureStream([{ type: "stream_error", status: 429, detail: "quota" }])
     );
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => expect(getByText(/out of muse for today/i)).toBeTruthy());
   });
 
@@ -159,7 +193,7 @@ describe("Story", () => {
         { type: "stream_error", status: 0, detail: "Connection lost mid-story. Tap to retry." },
       ])
     );
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => expect(getByText(/connection lost mid-story/i)).toBeTruthy());
   });
 
@@ -176,7 +210,7 @@ describe("Story", () => {
         ])
       );
 
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText(/tap to retry/i));
     fireEvent.press(getByText(/tap to retry/i));
     await waitFor(() => getByText(/Fresh scene/));
@@ -189,7 +223,6 @@ describe("Story", () => {
     const firstTurnGate = new Promise<void>((res) => (releaseFirst = res));
 
     async function* slowFirstTurn(): AsyncGenerator<StreamEvent> {
-      // Hold open until released — no events yet
       await firstTurnGate;
       yield { type: "token", t: "Scene one." };
       yield { type: "turn_complete", summary: "sum-1", scenarios: ["Option A"] };
@@ -211,21 +244,17 @@ describe("Story", () => {
         ])
       );
 
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText("Tap me"));
 
-    // Capture button, then press twice synchronously
     const btn = getByText("Tap me");
     fireEvent.press(btn);
     fireEvent.press(btn);
 
-    // Release the slow stream to let it complete
     releaseFirst!();
     await waitFor(() => getByText("Option A"));
 
-    // With streaming guard fix: only 2 calls (mount + first tap; second tap ignored)
-    // This test confirms the guard prevents overlapping streams
-    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(2); // mount + first tap; second tap ignored
   });
 
   it("retry does not advance the turn number", async () => {
@@ -240,7 +269,7 @@ describe("Story", () => {
           { type: "turn_complete", summary: "s", scenarios: ["A"] },
         ])
       );
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText(/tap to retry/i));
     fireEvent.press(getByText(/tap to retry/i));
     await waitFor(() => getByText(/Fresh/));
@@ -264,7 +293,7 @@ describe("Story", () => {
       })() as never;
     });
 
-    const { getByText, unmount } = render(<Story />);
+    const { getByText, unmount } = renderWrite();
     await waitFor(() => getByText(/Slow/));
     expect(capturedSignal?.aborted).toBe(false);
     unmount();
@@ -274,23 +303,20 @@ describe("Story", () => {
 
   it("tapping an option card blesses audio for iOS before the turn runs", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText("Force the iron door open now"));
     mockVoiceOutFake.unlock.mockClear();
     jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
     fireEvent.press(getByText("Force the iron door open now"));
     expect(mockVoiceOutFake.unlock).toHaveBeenCalled();
     // Settle the follow-on turn the tap kicked off before the test returns —
-    // its trailing state updates otherwise land outside act() and warn (the
-    // same hazard the "PTT is disabled while a turn is streaming" test
-    // flushes). The tap consumes the old cards, so this only resolves once
-    // the SECOND turn's turn_complete re-renders them.
+    // its trailing state updates otherwise land outside act() and warn.
     await waitFor(() => getByText("Ask the voice its name"));
   });
 
   it("pressing the mic blesses audio for iOS", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText("Force the iron door open now"));
     mockVoiceOutFake.unlock.mockClear();
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -311,7 +337,7 @@ describe("push-to-talk", () => {
       .mockReturnValueOnce(happyTurn());
     const converseSpy = jest.spyOn(api, "converse");
 
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -328,6 +354,25 @@ describe("push-to-talk", () => {
     expect(converseSpy).not.toHaveBeenCalled();
   });
 
+  it("a spoken ordinal pick ECHOES the words on screen (never a silent action)", async () => {
+    jest
+      .spyOn(api, "streamTurn")
+      .mockReturnValueOnce(happyTurn())
+      .mockReturnValueOnce(happyTurn());
+
+    const { getByText, getByTestId } = renderWrite();
+    await waitFor(() => getByText(/Force the iron door/));
+
+    fireEvent(getByTestId("ptt-button"), "pressIn");
+    const cb = mockVoiceFake.start.mock.calls[0][0];
+    fireEvent(getByTestId("ptt-button"), "pressOut");
+    act(() => cb.onFinal("the second one"));
+
+    // The user's exact words appear as a bubble — what the app HEARD is
+    // always visible, so a garbled transcript can't masquerade as a shrug.
+    await waitFor(() => getByText("the second one"));
+  });
+
   it("non-ordinal speech goes to converse with notes, options, and tail", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
     const converseSpy = jest.spyOn(api, "converse").mockReturnValueOnce(
@@ -338,7 +383,7 @@ describe("push-to-talk", () => {
       ])
     );
 
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -381,7 +426,7 @@ describe("push-to-talk", () => {
         ])
       );
 
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     const speak = (text: string) => {
@@ -419,7 +464,7 @@ describe("push-to-talk", () => {
       .spyOn(api, "converse")
       .mockReturnValueOnce(fixtureStream([{ type: "route", intent: "steer" }]));
 
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -448,7 +493,7 @@ describe("push-to-talk", () => {
         fixtureStream([{ type: "route", intent: "pick", index: 2 }])
       );
 
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -476,7 +521,7 @@ describe("push-to-talk", () => {
       ])
     );
 
-    const { getByText, getByTestId, queryByText } = render(<Story />);
+    const { getByText, getByTestId, queryByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -501,7 +546,7 @@ describe("push-to-talk", () => {
         })() as never
     );
 
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -534,7 +579,7 @@ describe("push-to-talk", () => {
       })() as never;
     });
 
-    const { getByText, getByTestId, queryByText } = render(<Story />);
+    const { getByText, getByTestId, queryByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -567,7 +612,7 @@ describe("push-to-talk", () => {
         ])
       );
 
-    const { getByText, getByTestId, getAllByText } = render(<Story />);
+    const { getByText, getByTestId, getAllByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -603,7 +648,7 @@ describe("push-to-talk", () => {
         ])
       );
 
-    const { getByText, queryByText } = render(<Story />);
+    const { getByText, queryByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
     fireEvent.press(getByText("Ask the voice its name"));
     await waitFor(() => getByText("Only new option"));
@@ -625,14 +670,13 @@ describe("push-to-talk", () => {
       })() as never
     );
 
-    const { getByTestId, getByText } = render(<Story />);
+    const { getByTestId, getByText } = renderWrite();
     await waitFor(() => getByText(/Slow/));
     expect(
       getByTestId("ptt-button").props.accessibilityState?.disabled
     ).toBe(true);
     // Flush the generator's remaining state updates under act() so releasing
-    // the gate doesn't produce an "update not wrapped in act" warning — the
-    // test only cares about the disabled assertion above, not this cleanup.
+    // the gate doesn't produce an "update not wrapped in act" warning.
     await act(async () => {
       release!();
     });
@@ -640,7 +684,7 @@ describe("push-to-talk", () => {
 
   it("mic permission error shows inline", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -649,18 +693,21 @@ describe("push-to-talk", () => {
     expect(getByText(/microphone permission denied/i)).toBeTruthy();
   });
 
-  it("back control exists", async () => {
+  it("the back control leads to the story hub, named after the story", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
-    expect(getByText(/home/i)).toBeTruthy();
+    const back = getByText(/← A dragon egg hatches\./);
+    fireEvent.press(back);
+    const { router } = require("expo-router");
+    expect(router.replace).toHaveBeenCalledWith("/story/s1");
   });
 });
 
 describe("narration", () => {
   it("speaks the scene when the turn completes", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
     expect(mockVoiceOutFake.speak).toHaveBeenCalledWith(
       "Scene. ",
@@ -673,7 +720,7 @@ describe("narration", () => {
       .spyOn(api, "streamTurn")
       .mockReturnValueOnce(happyTurn())
       .mockReturnValueOnce(happyTurn());
-    const { getByText } = render(<Story />);
+    const { getByText } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
     mockVoiceOutFake.stop.mockClear();
     fireEvent.press(getByText("Ask the voice its name"));
@@ -690,7 +737,7 @@ describe("narration", () => {
         { type: "discussion_complete", notes: "n" },
       ])
     );
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
 
     fireEvent(getByTestId("ptt-button"), "pressIn");
@@ -714,7 +761,7 @@ describe("narration", () => {
         await gate;
       })() as never
     );
-    const { getByTestId, getByText } = render(<Story />);
+    const { getByTestId, getByText } = renderWrite();
     await waitFor(() => getByText(/Slow/));
     fireEvent.press(getByTestId("stop-button"));
     expect(mockVoiceOutFake.stop).toHaveBeenCalled();
@@ -723,7 +770,7 @@ describe("narration", () => {
 
   it("holding the mic interrupts narration", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
     fireEvent(getByTestId("ptt-button"), "pressIn");
     expect(mockVoiceOutFake.stop).toHaveBeenCalled();
@@ -731,7 +778,7 @@ describe("narration", () => {
 
   it("speaking never disables the mic (isSpeaking is not isStreaming)", async () => {
     jest.spyOn(api, "streamTurn").mockReturnValueOnce(happyTurn());
-    const { getByText, getByTestId } = render(<Story />);
+    const { getByText, getByTestId } = renderWrite();
     await waitFor(() => getByText(/Force the iron door/));
     // Simulate narration in progress via the subscribed callback:
     const subscribed = mockVoiceOutFake.onSpeakingChange.mock.calls[0][0];
@@ -744,9 +791,9 @@ describe("narration", () => {
 });
 
 describe("resolveStoryLength", () => {
-  // The route param is URL-editable on web and can arrive as an array if the
-  // query string duplicates the key — this must always fall back to "short"
-  // rather than pass an unchecked cast through to the backend.
+  // Story records round-trip through localStorage, so length is an unchecked
+  // string at runtime — this must always fall back to "short" rather than
+  // pass an unchecked cast through to the backend.
   it("passes through a valid length", () => {
     expect(resolveStoryLength("medium")).toBe("medium");
     expect(resolveStoryLength("long")).toBe("long");
@@ -756,7 +803,7 @@ describe("resolveStoryLength", () => {
     expect(resolveStoryLength("epic")).toBe("short");
   });
 
-  it("falls back to short for an array (duplicated query param)", () => {
+  it("falls back to short for an array", () => {
     expect(resolveStoryLength(["long", "medium"])).toBe("short");
   });
 

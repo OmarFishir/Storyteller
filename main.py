@@ -796,6 +796,75 @@ def expand(req: ExpandRequest):
     return {"original": req.scenario, "expanded": expanded}
 
 
+# --- Story bible -------------------------------------------------------------
+# One-shot extraction powering the client's Characters / Environment /
+# History & Places pages. Stateless like everything else: the client sends
+# the summary + notes it already carries; the response is cached client-side
+# until the summary moves on. Genre-agnostic on purpose — no template needed.
+BIBLE_PROMPT = """You are a story-bible archivist for a story-building app.
+From the story summary and established notes below, extract the story bible.
+Respond with raw JSON only — no code fences, no commentary — in exactly this shape:
+{"characters": [{"name": "...", "description": "..."}], "places": [{"name": "...", "description": "..."}], "environment": "..."}
+
+Rules:
+- characters: every named character; description is 1-2 sentences built ONLY from facts in the material.
+- places: named locations and settings, same rule.
+- environment: 2-3 sentences on the world, its atmosphere and its era, drawn from the material.
+- Invent nothing. Empty lists (or an empty environment string) are correct when the material is thin."""
+
+BIBLE_BUDGET = 800  # a handful of entries, 1-2 sentences each
+
+
+class BibleRequest(BaseModel):
+    summary: str
+    notes: str = ""
+
+
+def validate_bible_payload(raw_text: str) -> dict:
+    """
+    Validate the archivist's JSON: characters/places as [{name, description}]
+    with non-empty string fields, environment as a string. Clean 502 otherwise.
+    """
+    data = parse_model_json(raw_text)
+    for key in ("characters", "places"):
+        entries = data.get(key)
+        if not isinstance(entries, list) or not all(
+            isinstance(e, dict)
+            and isinstance(e.get("name"), str)
+            and e["name"].strip()
+            and isinstance(e.get("description"), str)
+            and e["description"].strip()
+            for e in entries
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Model JSON missing valid '{key}'. Raw: {raw_text[:300]}",
+            )
+    if not isinstance(data.get("environment"), str):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model JSON missing valid 'environment'. Raw: {raw_text[:300]}",
+        )
+    return {
+        "characters": data["characters"],
+        "places": data["places"],
+        "environment": data["environment"],
+    }
+
+
+@app.post("/bible")
+def bible(req: BibleRequest):
+    """Extract the story bible (characters, places, environment) from summary + notes."""
+    raw = call_gemini(
+        # Static prompt first — the caching-order convention.
+        f"{BIBLE_PROMPT}\n\nSTORY SUMMARY:\n{req.summary}\n\nESTABLISHED NOTES:\n{req.notes or '(none yet)'}",
+        max_tokens=BIBLE_BUDGET,
+        temperature=0.4,  # extraction, not creation — keep it literal
+        label="bible",
+    )
+    return validate_bible_payload(raw)
+
+
 # --- Audio slice: the ears -------------------------------------------------
 # Audio input bills as ordinary input tokens (~30/sec of speech), so the
 # existing token meter captures STT cost with no schema change.

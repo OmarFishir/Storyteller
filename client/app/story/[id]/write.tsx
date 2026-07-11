@@ -6,18 +6,12 @@ import {
   converse,
   StoryLength,
   TurnRequest,
-  DiscussionEntry,
-} from "../lib/api";
-import { StreamingText } from "../components/StreamingText";
-import { PushToTalk } from "../components/PushToTalk";
-import { matchCard } from "../lib/matchCard";
-import { getVoiceOut, VoiceOut } from "../lib/voiceOut";
-
-type FeedItem =
-  | { kind: "scene"; text: string }
-  | { kind: "user_bubble"; text: string }
-  | { kind: "ai_bubble"; text: string }
-  | { kind: "cards"; options: string[] };
+} from "../../../lib/api";
+import { StreamingText } from "../../../components/StreamingText";
+import { PushToTalk } from "../../../components/PushToTalk";
+import { matchCard } from "../../../lib/matchCard";
+import { getVoiceOut, VoiceOut } from "../../../lib/voiceOut";
+import { useStories } from "../../../lib/store";
 
 type StreamError = { status: number; detail: string };
 
@@ -30,31 +24,20 @@ function errorMessage(error: StreamError): string {
 
 const LENGTHS = ["short", "medium", "long"] as const;
 
-// The route param is an unchecked cast from useLocalSearchParams — it's
-// URL-editable on web and can arrive as an array if the query string
-// duplicates the key. Total fallback to "short" for anything that isn't
-// exactly one of the three known lengths.
+// Story records round-trip through localStorage, so length is an unchecked
+// string at runtime. Total fallback to "short" for anything unexpected.
 export function resolveStoryLength(raw: unknown): StoryLength {
   return typeof raw === "string" && (LENGTHS as readonly string[]).includes(raw)
     ? (raw as StoryLength)
     : "short";
 }
 
-export default function Story() {
-  const { templateId, premise, length } = useLocalSearchParams<{
-    templateId: string;
-    premise: string;
-    length: StoryLength;
-  }>();
-  const storyLength: StoryLength = resolveStoryLength(length);
+export default function Write() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const { getStory, updateStory } = useStories();
+  const story = getStory(id);
 
-  const [feed, setFeed] = useState<FeedItem[]>([]);
-  const [scenes, setScenes] = useState<string[]>([]); // canonical story + turn clock
   const [currentScene, setCurrentScene] = useState("");
-  const [options, setOptions] = useState<string[]>([]);
-  const [summary, setSummary] = useState(premise);
-  const [notes, setNotes] = useState("");
-  const [discussion, setDiscussion] = useState<DiscussionEntry[]>([]);
   const [currentReply, setCurrentReply] = useState("");
   const [replyCount, setReplyCount] = useState(0); // keys StreamingText per reply
   const [pendingTurn, setPendingTurn] = useState<TurnRequest | null>(null);
@@ -78,9 +61,46 @@ export default function Story() {
     voiceOut.onSpeakingChange(setIsSpeaking);
   }, [voiceOut]);
 
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort(); // stop billing a screen nobody is watching
+      voiceOut.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A FRESH story (no scenes, nothing streamed yet) opens with its first
+  // turn. A story being revisited just renders its feed — no auto-run.
+  useEffect(() => {
+    if (startedRef.current || !story || story.scenes.length > 0) return;
+    startedRef.current = true;
+    runTurn({
+      template_id: story.templateId,
+      summary: story.premise,
+      chosen_scenario: "Open the story.",
+      turn: 1,
+      length: resolveStoryLength(story.length),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [story?.id]);
+
+  if (!story) {
+    return (
+      <View style={styles.root}>
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} style={styles.backButton}>
+            <Text style={styles.backButtonText}>← Home</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.missingText}>This story isn't here anymore.</Text>
+      </View>
+    );
+  }
+  const storyId = story.id;
+
   async function runTurn(req: TurnRequest) {
     // Guard against overlapping turns (one busy flag shared with runConverse)
-    if (streamingRef.current) return;
+    if (streamingRef.current || !story) return;
     streamingRef.current = true;
     voiceOut.stop(); // a new turn silences whatever scene/reply was narrating
     setIsStreaming(true);
@@ -91,11 +111,13 @@ export default function Story() {
 
     setError(null);
     setCurrentScene("");
-    setOptions([]);
     setPendingTurn(req);
     setTurnCount((n) => n + 1);
     // An offer is consumed by the next turn — drop any leftover cards.
-    setFeed((f) => f.filter((i) => i.kind !== "cards"));
+    updateStory(storyId, (prev) => ({
+      options: [],
+      feed: prev.feed.filter((i) => i.kind !== "cards"),
+    }));
 
     let sceneText = "";
     let gotTurnComplete = false;
@@ -103,7 +125,7 @@ export default function Story() {
 
     try {
       for await (const ev of streamTurn(
-        { ...req, notes },
+        { ...req, notes: story.notes },
         { signal: controller.signal }
       )) {
         if (ev.type === "token") {
@@ -111,15 +133,17 @@ export default function Story() {
           setCurrentScene(sceneText);
         } else if (ev.type === "turn_complete") {
           gotTurnComplete = true;
-          setScenes((prev) => [...prev, sceneText]);
-          setFeed((f) => [
-            ...f,
-            { kind: "scene", text: sceneText },
-            { kind: "cards", options: ev.scenarios },
-          ]);
+          updateStory(storyId, (prev) => ({
+            scenes: [...prev.scenes, sceneText],
+            feed: [
+              ...prev.feed,
+              { kind: "scene", text: sceneText },
+              { kind: "cards", options: ev.scenarios },
+            ],
+            summary: ev.summary,
+            options: ev.scenarios,
+          }));
           setCurrentScene("");
-          setSummary(ev.summary);
-          setOptions(ev.scenarios);
           setPendingTurn(null);
           voiceOut.speak(sceneText, { kind: "scene" });
         } else if (ev.type === "stream_error") {
@@ -140,7 +164,7 @@ export default function Story() {
   }
 
   async function runConverse(utterance: string, isRetry = false) {
-    if (streamingRef.current) return;
+    if (streamingRef.current || !story) return;
     streamingRef.current = true;
     voiceOut.stop(); // a new turn silences whatever scene/reply was narrating
     setIsStreaming(true);
@@ -150,10 +174,13 @@ export default function Story() {
     abortRef.current = controller;
 
     if (!isRetry) {
-      setFeed((f) => [...f, { kind: "user_bubble", text: utterance }]);
-      setDiscussion((d) =>
-        [...d, { role: "user" as const, text: utterance }].slice(-6)
-      );
+      updateStory(storyId, (prev) => ({
+        feed: [...prev.feed, { kind: "user_bubble", text: utterance }],
+        discussion: [
+          ...prev.discussion,
+          { role: "user" as const, text: utterance },
+        ].slice(-6),
+      }));
     }
     setError(null);
     setCurrentReply("");
@@ -170,18 +197,19 @@ export default function Story() {
     try {
       for await (const ev of converse(
         {
-          template_id: templateId,
+          template_id: story.templateId,
           utterance,
-          summary,
-          notes,
-          options,
+          summary: story.summary,
+          notes: story.notes,
+          options: story.options,
           discussion: isRetry
-            ? [...discussion].slice(-6)
-            : [...discussion, { role: "user" as const, text: utterance }].slice(
-                -6
-              ),
-          turn: scenes.length + 1,
-          length: storyLength,
+            ? [...story.discussion].slice(-6)
+            : [
+                ...story.discussion,
+                { role: "user" as const, text: utterance },
+              ].slice(-6),
+          turn: story.scenes.length + 1,
+          length: resolveStoryLength(story.length),
         },
         { signal: controller.signal }
       )) {
@@ -190,12 +218,21 @@ export default function Story() {
           setCurrentReply(replyText);
         } else if (ev.type === "discussion_complete") {
           completed = true;
-          setNotes(ev.notes);
+          const notes = ev.notes;
+          const reply = replyText;
+          updateStory(storyId, (prev) => ({
+            notes,
+            ...(reply.trim()
+              ? {
+                  feed: [...prev.feed, { kind: "ai_bubble" as const, text: reply }],
+                  discussion: [
+                    ...prev.discussion,
+                    { role: "ai" as const, text: reply },
+                  ].slice(-6),
+                }
+              : {}),
+          }));
           if (replyText.trim()) {
-            setFeed((f) => [...f, { kind: "ai_bubble", text: replyText }]);
-            setDiscussion((d) =>
-              [...d, { role: "ai" as const, text: replyText }].slice(-6)
-            );
             voiceOut.speak(replyText, { kind: "reply" });
           }
           setCurrentReply("");
@@ -211,10 +248,14 @@ export default function Story() {
       // it), but notes stay unchanged — canon only updates through
       // discussion_complete.
       if (!completed && replyText.trim()) {
-        setFeed((f) => [...f, { kind: "ai_bubble", text: replyText }]);
-        setDiscussion((d) =>
-          [...d, { role: "ai" as const, text: replyText }].slice(-6)
-        );
+        const reply = replyText;
+        updateStory(storyId, (prev) => ({
+          feed: [...prev.feed, { kind: "ai_bubble" as const, text: reply }],
+          discussion: [
+            ...prev.discussion,
+            { role: "ai" as const, text: reply },
+          ].slice(-6),
+        }));
         setCurrentReply("");
       }
       streamingRef.current = false;
@@ -227,47 +268,29 @@ export default function Story() {
     // just before Stop was pressed must not fire — the user braked, and
     // handleChoose would otherwise launch a fresh turn behind their back.
     if (routed && !controller.signal.aborted) {
-      if (routed.intent === "pick") handleChoose(options[routed.index]);
+      if (routed.intent === "pick") handleChoose(story.options[routed.index]);
       else if (routed.intent === "steer") handleChoose(utterance);
       else if (routed.intent === "options") {
         const scenarios = routed.scenarios;
-        setOptions(scenarios);
-        setFeed((f) => [
-          ...f.filter((i) => i.kind !== "cards"),
-          { kind: "cards", options: scenarios },
-        ]);
+        updateStory(storyId, (prev) => ({
+          options: scenarios,
+          feed: [
+            ...prev.feed.filter((i) => i.kind !== "cards"),
+            { kind: "cards", options: scenarios },
+          ],
+        }));
       }
     }
   }
 
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort(); // stop billing a screen nobody is watching
-      voiceOut.stop();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    runTurn({
-      template_id: templateId,
-      summary: premise,
-      chosen_scenario: "Open the story.",
-      turn: scenes.length + 1,
-      length: storyLength,
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const handleChoose = (scenario: string) => {
+    if (!story) return;
     runTurn({
-      template_id: templateId,
-      summary,
+      template_id: story.templateId,
+      summary: story.summary,
       chosen_scenario: scenario,
-      turn: scenes.length + 1,
-      length: storyLength,
+      turn: story.scenes.length + 1,
+      length: resolveStoryLength(story.length),
     });
   };
 
@@ -276,13 +299,21 @@ export default function Story() {
     else if (pendingTurn) runTurn(pendingTurn);
   };
 
-  // Push-to-talk: an ordinal match ("the second one") picks a card straight
-  // away — no confirm window, no round trip. Anything else goes to /converse,
-  // where a model decides pick / steer / discuss / options with context.
+  // Push-to-talk: EVERY utterance echoes on screen first — the app must
+  // never look like it disregarded the user (the Samuel lesson: a garbled
+  // transcript that silently fired a turn was indistinguishable from being
+  // ignored). An ordinal match ("the second one") then picks a card straight
+  // away; anything else goes to /converse, where a model decides
+  // pick / steer / discuss / options with context.
   const handleUtterance = (utterance: string) => {
-    const idx = matchCard(utterance, options);
+    if (!story) return;
+    const idx = matchCard(utterance, story.options);
     if (idx !== null) {
-      handleChoose(options[idx]);
+      const chosen = story.options[idx];
+      updateStory(storyId, (prev) => ({
+        feed: [...prev.feed, { kind: "user_bubble", text: utterance }],
+      }));
+      handleChoose(chosen);
       return;
     }
     runConverse(utterance);
@@ -291,8 +322,11 @@ export default function Story() {
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backButtonText}>← Home</Text>
+        <Pressable
+          onPress={() => router.replace(`/story/${storyId}`)}
+          style={styles.backButton}
+        >
+          <Text style={styles.backButtonText}>← {story.title}</Text>
         </Pressable>
       </View>
 
@@ -302,7 +336,7 @@ export default function Story() {
         contentContainerStyle={styles.content}
         onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
       >
-        {feed.map((item, idx) => {
+        {story.feed.map((item, idx) => {
           if (item.kind === "scene") {
             return (
               <Text key={idx} style={styles.sceneText}>
@@ -416,6 +450,11 @@ const styles = StyleSheet.create({
     color: "#7aa2f7",
     fontSize: 15,
     fontWeight: "bold",
+  },
+  missingText: {
+    color: "#a0a0a0",
+    fontSize: 15,
+    padding: 20,
   },
   screen: {
     flex: 1,

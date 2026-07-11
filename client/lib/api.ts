@@ -131,3 +131,46 @@ export function converse(
     opts
   );
 }
+
+export type BibleEntry = { name: string; description: string };
+export type BibleResponse = {
+  characters: BibleEntry[];
+  places: BibleEntry[];
+  environment: string;
+};
+
+// Mock mode never spends AI on the bible either — a canned extraction that
+// matches the canned mock story (Mira, the iron door, the lower stacks).
+const MOCK_BIBLE: BibleResponse = {
+  characters: [
+    {
+      name: "Mira",
+      description:
+        "An apprentice mapmaker following a corridor that appears on no map, stubborn enough to open doors she shouldn't.",
+    },
+  ],
+  places: [
+    {
+      name: "The forbidden lower stacks",
+      description:
+        "The library's deep levels, where a cold iron door hides a map of the kingdom that draws itself.",
+    },
+  ],
+  environment:
+    "A vast library-city of candlelight and ink, where maps misbehave and corridors exist only for those who walk them.",
+};
+
+/** One-shot story-bible extraction from the running summary + notes canon. */
+export async function getBible(
+  summary: string,
+  notes: string
+): Promise<BibleResponse> {
+  if (USE_MOCK) return MOCK_BIBLE;
+  const res = await streamingFetch(`${API_URL}/bible`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ summary, notes }),
+  });
+  if (!res.ok) throw new Error(`Story bible failed (${res.status})`);
+  return (await res.json()) as BibleResponse;
+}

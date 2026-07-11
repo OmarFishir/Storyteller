@@ -1,10 +1,10 @@
 import { Stack } from "expo-router";
+import { StoriesProvider } from "../lib/store";
 
 export default function RootLayout() {
   return (
-    <Stack>
-      <Stack.Screen name="index" options={{ headerShown: false }} />
-      <Stack.Screen name="story" options={{ headerShown: false }} />
-    </Stack>
+    <StoriesProvider>
+      <Stack screenOptions={{ headerShown: false }} />
+    </StoriesProvider>
   );
 }

@@ -11,6 +11,7 @@ import { router } from "expo-router";
 import { getTemplates, StoryLength, Template } from "../lib/api";
 import { PushToTalk } from "../components/PushToTalk";
 import { getVoiceOut } from "../lib/voiceOut";
+import { useStories } from "../lib/store";
 
 type LoadState = "loading" | "error" | "ready";
 
@@ -22,6 +23,7 @@ const LENGTH_LABELS: Record<StoryLength, string> = {
 };
 
 export default function Home() {
+  const { stories, createStory } = useStories();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [selected, setSelected] = useState<Template | null>(null);
@@ -48,16 +50,43 @@ export default function Home() {
     if (!selected || !canBegin) return;
     // A real tap: bless iOS audio now so the opening scene can auto-narrate.
     getVoiceOut().unlock();
-    router.push({
-      pathname: "/story",
-      params: { templateId: selected.id, premise, length },
+    const story = createStory({
+      templateId: selected.id,
+      premise,
+      length,
     });
+    router.push(`/story/${story.id}/write`);
   };
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Storyteller</Text>
-      <Text style={styles.subtitle}>Pick a genre, then set the scene.</Text>
+
+      {stories.length > 0 && (
+        <View style={styles.librarySection}>
+          <Text style={styles.sectionLabel}>Your stories</Text>
+          {stories.map((story) => (
+            <Pressable
+              key={story.id}
+              testID={`story-card-${story.id}`}
+              onPress={() => router.push(`/story/${story.id}`)}
+              style={styles.storyCard}
+            >
+              <Text style={styles.storyCardTitle}>{story.title}</Text>
+              <Text style={styles.storyCardMeta}>
+                {story.scenes.length}{" "}
+                {story.scenes.length === 1 ? "scene" : "scenes"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+
+      <Text style={styles.sectionLabel}>
+        {stories.length > 0
+          ? "Start a new story"
+          : "Pick a genre, then set the scene."}
+      </Text>
 
       {loadState === "loading" && (
         <Text style={styles.status}>Loading genres...</Text>
@@ -127,7 +156,10 @@ export default function Home() {
                 <Pressable
                   key={option}
                   onPress={() => setLength(option)}
-                  style={[styles.lengthChip, isSelected && styles.lengthChipSelected]}
+                  style={[
+                    styles.lengthChip,
+                    isSelected && styles.lengthChipSelected,
+                  ]}
                 >
                   <Text
                     style={[
@@ -168,12 +200,28 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: "bold",
     color: "#f2f2f2",
-  },
-  subtitle: {
-    fontSize: 15,
-    color: "#a0a0a0",
-    marginTop: 4,
     marginBottom: 20,
+  },
+  librarySection: {
+    marginBottom: 24,
+  },
+  storyCard: {
+    padding: 16,
+    borderRadius: 10,
+    backgroundColor: "#1a2333",
+    borderWidth: 1,
+    borderColor: "#2e3a50",
+    marginBottom: 12,
+  },
+  storyCardTitle: {
+    fontSize: 17,
+    fontWeight: "bold",
+    color: "#f2f2f2",
+  },
+  storyCardMeta: {
+    fontSize: 13,
+    color: "#a0a8c0",
+    marginTop: 4,
   },
   status: {
     color: "#a0a0a0",

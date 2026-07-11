@@ -146,6 +146,19 @@ FastAPI server in `main.py`:
   `max_output_tokens=600`, `temperature=0.8`. Returns prose directly (NO JSON
   parsing — simpler than /suggest). Echoes `original` from the request rather than
   paying the model to reproduce it.
+- `POST /bible` — `{"summary": "...", "notes": ""}` → `{"characters":
+  [{name, description}], "places": [{name, description}], "environment":
+  "..."}` — the story-bible extraction behind the client's Characters /
+  Environment / History & Places pages. ONE cheap call (static
+  `BIBLE_PROMPT` first per the caching-order convention, then summary +
+  notes with an `(none yet)` placeholder; `BIBLE_BUDGET=800`,
+  `temperature=0.4` — extraction, not creation; label `bible`).
+  `validate_bible_payload()` enforces the shape fail-loud (non-empty
+  name/description strings, environment a string; empty lists are VALID —
+  a thin story has a thin bible) → clean 502 on model garbage.
+  Genre-agnostic on purpose: no template_id, no style injection.
+  Stateless like everything else — the client caches the result per story
+  until the summary moves on.
 - `POST /transcribe` — the audio slice's EARS. Multipart `audio` file in →
   `{"transcript": "..."}` out. ONE Gemini call on the shared `MODEL` constant
   (`[TRANSCRIBE_PROMPT, Part.from_bytes(data, mime_type=audio.content_type or
@@ -316,11 +329,14 @@ reading/export view arrives with persistence in Phase 3. Full design:
 `docs/superpowers/specs/2026-07-03-story-structure-design.md`.
 
 Tests in `tests/test_api.py`, `tests/test_templates.py`, `tests/test_beats.py`,
-`tests/test_converse.py`, and `tests/test_audio.py`
-(pytest + FastAPI `TestClient`, **117 tests** — up from 115; the delta is
-two final-review additions to `test_audio.py` (now 14 tests, up from 12): a
-per-kind TTS-budget parametrization (scene/reply) and the previously-riding
-`call_gemini_tts` retry-then-succeed test): health
+`tests/test_converse.py`, `tests/test_audio.py`, and `tests/test_bible.py`
+(pytest + FastAPI `TestClient`, **126 tests** — up from 117; the delta is
+`test_bible.py`'s 9: the `/bible` happy path with cost caps + label +
+prompt-order pinned, the empty-notes `(none yet)` placeholder, empty lists
+accepted as a valid thin bible, five garbage shapes → 502, and a missing
+summary → 422. The 117 included two final-review additions to
+`test_audio.py` (14 tests): a per-kind TTS-budget parametrization
+(scene/reply) and the `call_gemini_tts` retry-then-succeed test): health
 check; retry-then-succeed
 and retry-exhaustion → 503; 429-without-retry and other-4xx passthrough;
 empty-response → 502; /suggest shape bare and with `template_id` (404 on
@@ -452,84 +468,58 @@ Expo Router + TypeScript, SDK 57 (React Native 0.86, React 19.2.3). Lives in
 *inside* the project, so the project root needed a different name (approved
 deviation from the original spec's `app/`).
 
-- **Screens** (`client/app/`): `index.tsx` (Home) — loads `GET /templates`,
-  renders a genre card per template plus tappable premise-seed chips that fill
-  the premise box, a story-length picker (chip row: `Short` / `Medium` /
-  `Long`, default `Short`, styled like the genre-card selection highlight),
-  "Begin the story" routes to `/story` carrying the chosen `length` as a route
-  param alongside the template/premise. A compact `PushToTalk` mic sits beside
-  the premise box (rendered only once a template is selected and voice input
-  is available); the final transcript replaces the premise value directly —
-  the input itself is the confirm step, no separate confirmation UI on Home.
-  `story.tsx` (Story) — a typed feed drives the screen: `FeedItem` is
-  `{kind: "scene", text}` | `{kind: "user_bubble", text}` |
-  `{kind: "ai_bubble", text}` | `{kind: "cards", options}`, rendered in order
-  inside one `ScrollView`. `scenes` (the array of verbatim scene strings)
-  stays separate from `feed` and remains the canonical story + turn clock
-  (`turn: scenes.length + 1` on every request) — the hard invariant above is
-  untouched by the conversational feature. `runTurn` (against
-  `POST /continue/stream`) is unchanged in shape: `token` events accumulate
-  into `StreamingText`, `turn_complete` archives the scene into both `scenes`
-  and `feed` (a scene item + a fresh `cards` item for the server's returned
-  options, after dropping any leftover `cards` item — an offer is consumed by
-  the next turn) and updates `summary`; `turn`/`length` carrying, the
-  `resolveStoryLength()` fallback, and the frozen-retry-object semantics are
-  all as before. A spoken (or typed) utterance flows through
-  `handleUtterance`: `matchCard(utterance, options)` — now ORDINALS ONLY,
-  see `lib/matchCard.ts` below — either fires `handleChoose` (the SAME
-  `runTurn` path option-card taps use) INSTANTLY, no confirm window, or falls
-  through to `runConverse(utterance)`. **The slice C confirm bar and its 1.5s
-  auto-fire window are REMOVED** (owner decision: silent routing — an
-  ordinal match is unambiguous enough to act on immediately, and anything
-  else is better served by an actual conversational reply than a guessed
-  paraphrase). `runConverse` posts to `POST /converse/stream` carrying
-  `utterance, summary, notes, options, discussion` (the last <=6 turns,
-  capped the same way on both sides) plus `turn`/`length`; it optimistically
-  appends a `user_bubble` to the feed and the discussion tail, streams
-  `reply_token`s into a live `ai_bubble` (`StreamingText`, keyed by an
-  incrementing `replyCount` so each reply animates independently), and on
-  `discussion_complete` commits the finished bubble to `feed`/`discussion`
-  and the returned `notes` to state — notes are canon; they only change
-  through this event. A `route` frame (pick/steer/options) is acted on AFTER
-  the stream loop and guard release: `pick`/`steer` call `handleChoose`
-  (the indexed card, or the utterance verbatim); `options` swaps the current
-  `cards` feed item for the fresh scenarios without running a turn. `runTurn`
-  and `runConverse` share one `streamingRef`/`isStreaming` busy guard (a card
-  tap can't race a live conversation or vice versa) and one
-  `AbortController` ref; a "■ Stop" control (rendered only while
-  `isStreaming`) aborts whichever stream is live — silently, via
-  `streamPost`'s shared abort semantics, never surfacing as an error, and any
-  partial scene or reply already shown is kept. A converse failure arms
-  `pendingConverse` (the failed utterance) instead of `pendingTurn`;
-  `handleRetry` re-runs `runConverse` (never a stale turn) when it's set,
-  replaying the SAME discussion tail rather than double-appending the user's
-  line. The unmount effect (abort on navigate-away) and the `stream_error` →
-  `errorMessage()` banner (429/503/status-0/generic) are unchanged from
-  slice B/C. The "← Home" `Pressable` (`router.back()`) still sits in a
-  header row above the ScrollView, and the `PushToTalk` bar still lives
-  BELOW the ScrollView in a `pttArea` `View` so it stays visible while
-  scrolling. Narration (slice D) speaks AUTOMATICALLY and non-negotiably —
-  no per-turn opt-in: `runTurn`'s `turn_complete` calls
-  `voiceOut.speak(sceneText, {kind: "scene"})`, and `runConverse`'s
-  `discussion_complete` calls `voiceOut.speak(replyText, {kind: "reply"})`. A
-  `voiceOut.onSpeakingChange(setIsSpeaking)` effect keeps `isSpeaking` a
-  SEPARATE state from `isStreaming` on purpose (the co-creation review's
-  riding note — don't overload Stop-button semantics with playback state —
-  resolved here): narration can keep talking after a stream has already
-  finished, and the reverse. The "■ Stop" control now renders while
-  `isStreaming || isSpeaking` (either used to be sufficient alone) and its
-  press both aborts the in-flight stream AND calls `voiceOut.stop()` — one
-  button silences generation and narration together. `PushToTalk` gained an
-  `onActivate` prop wired to `voiceOut.stop()`: pressing the mic to speak
-  interrupts any narration playing, so the user is never talking over the
-  AI. `isStreaming` (NOT `isSpeaking`) still gates the mic's `disabled`
-  prop — you can start talking while a reply/scene narrates, since
-  interrupting it mid-word is the point. Final-review fix: `runTurn` and
-  `runConverse` now also call `voiceOut.stop()` themselves, right after their
-  shared `streamingRef` guard passes — previously only the Stop button and
-  the mic's `onActivate` silenced narration, so tapping an option card (or a
-  spoken ordinal pick) while scene N was still narrating let it keep talking
-  over scene N+1.
+- **The story store** (`lib/store.tsx`) — the Sudowrite-style redesign's
+  backbone (owner directive 2026-07-11, after the first phone session: the
+  old 2-screen app LOST the in-progress story on navigation, and a garbled
+  voice pick was indistinguishable from being ignored). One global
+  `StoriesProvider` holds every `StoryRecord` — id, editable `title`,
+  template/premise/length, verbatim `scenes` (still the canonical story),
+  `summary`, `notes`, `options`, `feed`, `discussion`, per-topic chats,
+  cached `bible` — persisted to localStorage on web (key
+  `storyteller.stories.v1`; native has no localStorage, so stories are
+  in-memory there until a native impl slots into the same two load/save
+  functions). Screens are views over the store: navigation can never lose
+  a story. `updateStory(id, prev => patch)` is functional-only, so async
+  stream handlers never clobber newer state. Corrupt/absent storage never
+  blocks the app. Test seam: `initialStories` prop skips the load.
+- **Pages** (`client/app/`): `index.tsx` (Home) — the library: a card per
+  saved story (title + scene count, tap → hub) above the new-story flow
+  (genre cards, premise box + seed chips + compact mic, length picker;
+  "Begin the story" creates a store record — `title` defaults to the
+  premise's first six words — and routes to `/story/[id]/write`).
+  `story/[id]/index.tsx` (Hub) — the story's own page: editable title,
+  summary preview, four section cards (Story / Characters / Environment /
+  History & Places) and delete. `story/[id]/write.tsx` — the turn loop;
+  feed/scenes/summary/notes/options/discussion all read and written
+  through the store, and the old story.tsx behavior contracts carry over
+  verbatim (shared `streamingRef` busy guard, route pick/steer/options
+  handling after guard release, stop-suppresses-captured-routes,
+  converse-vs-turn retry precedence, auto-narration + one ■ Stop for
+  stream and narration together, `unlock()` blessing on card taps and mic
+  press, `isStreaming`-not-`isSpeaking` gating the mic) with two
+  deliberate changes: a FRESH story auto-runs turn 1 while a REOPENED one
+  just renders its feed (pinned by test), and EVERY utterance — including
+  a spoken ordinal pick — echoes as a `user_bubble` before anything acts
+  on it (the Samuel lesson: what the app heard must always be visible, so
+  a bad transcript can't masquerade as a shrug). Back control is
+  "← {story.title}" → the hub via `router.replace`.
+  `story/[id]/{characters,environment,history}.tsx` — thin wrappers over
+  `components/TopicPage.tsx`.
+- **`components/TopicPage.tsx`** — one story-bible page per topic: the
+  extracted section (character cards / environment prose / place cards)
+  above a chat scoped to that topic. The bible comes from `getBible()`
+  (below), cached on the record until `summary` moves on, auto-fetched on
+  first visit to a story with scenes, manual "↻ Update from the story"
+  button, inline retry on failure. The chat posts to `/converse/stream`
+  with a topic preamble prefixed to the utterance (the raw words are what
+  land in the bubble), `options: []` (discussion-only), and the page's OWN
+  discussion tail (last 6, kept in `topicChats[topic]`); replies stream
+  into a live bubble, narrate (`kind: "reply"`), and commit on
+  `discussion_complete`, whose `notes` go to the SHARED notes canon —
+  facts established on a bible page flow into the next scene. A
+  steer/pick/options route frame becomes a fixed nudge bubble ("head to
+  the Story page") — a bible page can never fire a turn. Converse errors
+  render inline in the chat; the user's echo bubble always lands first.
 - **`lib/sse.ts`** — `SSEParser`: an incremental frame parser that buffers
   across network chunk boundaries (splits on `"\n\n"`, and copes if the
   separator itself is split across chunks) and turns `scene_token` /
@@ -543,8 +533,12 @@ deviation from the original spec's `app/`).
   can't act on (anything other than `pick`/`steer`/`options`) is a BROKEN
   CONTRACT, not forward-compat, so it also yields `stream_error` rather than
   being silently ignored.
-- **`lib/api.ts`** — `getTemplates()`, `streamTurn()`, and `converse()` (new),
-  the app's three calls into the backend. `streamTurn` and `converse` both
+- **`lib/api.ts`** — `getTemplates()`, `streamTurn()`, `converse()`, and
+  `getBible()` (plain POST to `/bible` returning
+  `{characters, places, environment}`; under `EXPO_PUBLIC_USE_MOCK` it
+  returns a canned `MOCK_BIBLE` client-side — zero AI cost, matching the
+  mock stance everywhere else), the app's calls into the backend.
+  `streamTurn` and `converse` both
   run through one shared generator, `streamPost(url, body, opts?: { signal?:
   AbortSignal })`, so they get identical semantics: a deliberate abort — an
   `AbortError` thrown by the initial `fetch` OR one raised mid-read while
@@ -683,8 +677,19 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **118 tests** across 10
-  suites, up from 98 across 9 — the phone-preview slice's delta: a new
+- Tests (jest-expo preset, `restoreMocks: true`, **140 tests** across 13
+  suites — the Sudowrite-redesign delta on top of the phone-preview
+  slice's 118/10: `lib/__tests__/store.test.tsx` (create/functional-
+  update/persist-and-reload/corrupt-storage/delete + `defaultTitle`),
+  `app/__tests__/hub.test.tsx` (title/summary/sections/navigation/rename/
+  fresh-story states), `components/__tests__/TopicPage.test.tsx` (bible
+  fetch + per-topic rendering, no-scenes guard, topic-preambled converse
+  with `options: []`, echo-then-reply, route→nudge with no turn fired,
+  inline converse errors, mic path + unlock), `app/__tests__/write.test.tsx`
+  (the old story.test.tsx suite adapted to the store — every behavioral
+  pin carried over — plus reopened-story-never-reruns and
+  ordinal-pick-echoes-visibly), and `index.test.tsx` gaining the library
+  list and store-record pins. The phone-preview delta was: a new
   `components/__tests__/PushToTalk.test.tsx` suite pinning the 8s/15s
   stuck-phase-timeout boundary, plus new `unlock()` / autoplay-rejection /
   blob-revoke-on-natural-end / `speechSynthesis`-watchdog test blocks added
@@ -938,22 +943,30 @@ deviation from the original spec's `app/`).
 
 ## NEXT STEPS — follow the roadmap
 
-**Phone-in-hand preview slice: SHIPPED, owner session pending.** Design:
-`docs/superpowers/specs/2026-07-11-phone-preview-design.md`; plan executed
-across commits `0cdd418`..`9421e45` on master (see "What's BUILT and
-WORKING" → "Client app" above for the full delta: the `voiceOut.ts` iOS
-autoplay rework, the four `unlock()` gesture points, `PushToTalk`'s 15s
-timeout, `phone-preview.ps1`). Before the owner's first live session: (1)
-flip to the Gemini **paid tier** (audio brings a full turn to ~4 Gemini
-calls, and the free daily cap has already cut off testing twice) and (2) set a
-Google Cloud **budget alert** so spend can't silently exceed the ~$20/month
-dev budget. Then run `.\phone-preview.ps1` from the repo root and work
-through the 9-step on-phone gut-check in the design spec's "Testing"
-section (silent-mode-off through watching `logs/usage.jsonl`) — this also
-closes out the audio slice's still-overdue mic-and-ear acceptance test.
-While there, confirm the one thing this slice couldn't verify itself:
-pressing Ctrl+C in the `phone-preview.ps1` window actually tears the
-session down (backend, both tunnels) cleanly.
+**Sudowrite-style redesign v1: BUILT (2026-07-11), owner phone session
+pending.** The owner's first phone session found the 2-screen app
+disappointing (navigation lost the story; a garbled voice pick looked like
+being ignored) and directed a rework toward Sudowrite-style pages, built
+LEAN by explicit owner directive — design in chat, no spec/plan docs, no
+subagent pipeline (see the process note below). What shipped: the
+persistent story store, the Home library, the per-story hub, the write
+page on the store with the always-echo guarantee, the three story-bible
+topic pages, and `POST /bible` (all described in "What's BUILT and
+WORKING"). Owner session checklist, unchanged in substance: (1) flip the
+Gemini **paid tier** + set a Google Cloud **budget alert** (~$10 of the
+~$20/month dev budget); (2) `EXPO_PUBLIC_USE_MOCK=0`; (3) run
+`.\phone-preview.ps1`, scan the QR IMAGE (Expo's own terminal QR opens
+Expo Go — wrong app); (4) play: library → hub → write with voice, visit
+the Characters page and ask about someone by name (the Samuel case), watch
+facts flow back into scenes; (5) confirm Ctrl+C tears the session down;
+(6) judge transcription + voice quality (`logs/usage.jsonl` for spend) —
+still the audio slice's overdue mic-and-ear acceptance test.
+
+**Process directive (owner, 2026-07-11, binding):** do NOT run the full
+superpowers brainstorm→spec→plan→subagent pipeline by default — it cost
+too many tokens for the value delivered. Design in chat in a few
+sentences, implement directly, keep suites green, ship increments. Use
+individual pieces (a review pass, TDD) only where they clearly pay.
 
 The approved phase plan lives in
 `docs/superpowers/specs/2026-07-02-voice-first-roadmap.md`. Summary:

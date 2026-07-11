@@ -1,13 +1,15 @@
 import { render, fireEvent, waitFor, act } from "@testing-library/react-native";
+import { Text } from "react-native";
 import Home from "../index";
 import * as api from "../../lib/api";
+import { StoriesProvider, StoryRecord, useStories } from "../../lib/store";
 
 jest.mock("expo-router", () => ({
   router: { push: jest.fn() },
 }));
 
 // --- voice fake: capture callbacks so tests can drive recognition ---
-// (named with a "mock" prefix — see story.test.tsx for why bare "voiceFake"
+// (named with a "mock" prefix — see write.test.tsx for why bare "voiceFake"
 // fails Jest's babel hoisting check inside the jest.mock factory below.)
 const mockVoiceFake = {
   available: true,
@@ -35,21 +37,58 @@ const TEMPLATES = [
   { id: "noir", name: "Mystery / Noir", description: "d2", premise_seeds: ["One last case."] },
 ];
 
-describe("Home", () => {
-  beforeEach(() => {
-    mockVoiceOutFake.unlock.mockClear();
-  });
+// Exposes the provider's stories so tests can pin what createStory recorded.
+function StoreProbe() {
+  const { stories } = useStories();
+  return (
+    <Text testID="store-probe">
+      {stories.map((s) => `${s.templateId}|${s.length}|${s.premise}`).join(";")}
+    </Text>
+  );
+}
 
+const renderHome = (initialStories: StoryRecord[] = []) =>
+  render(
+    <StoriesProvider initialStories={initialStories}>
+      <Home />
+      <StoreProbe />
+    </StoriesProvider>
+  );
+
+const savedStory = (over: Partial<StoryRecord> = {}): StoryRecord => ({
+  id: "saved-1",
+  title: "The lighthouse keeper's secret",
+  templateId: "noir",
+  premise: "The lighthouse keeper's secret",
+  length: "short",
+  scenes: ["Scene one.", "Scene two."],
+  summary: "sum",
+  notes: "",
+  options: [],
+  feed: [],
+  discussion: [],
+  topicChats: { characters: [], environment: [], history: [] },
+  bible: null,
+  createdAt: 1,
+  updatedAt: 1,
+  ...over,
+});
+
+beforeEach(() => {
+  mockVoiceOutFake.unlock.mockClear();
+});
+
+describe("Home", () => {
   it("renders a card per template", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
-    const { getByText } = render(<Home />);
+    const { getByText } = renderHome();
     await waitFor(() => expect(getByText("Fantasy Adventure")).toBeTruthy());
     expect(getByText("Mystery / Noir")).toBeTruthy();
   });
 
   it("tapping a seed fills the premise input", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
-    const { getByText, getByPlaceholderText } = render(<Home />);
+    const { getByText, getByPlaceholderText } = renderHome();
     await waitFor(() => getByText("Fantasy Adventure"));
     fireEvent.press(getByText("Fantasy Adventure"));
     fireEvent.press(getByText("A dragon egg hatches."));
@@ -58,28 +97,43 @@ describe("Home", () => {
 
   it("shows a retry state when templates fail to load", async () => {
     jest.spyOn(api, "getTemplates").mockRejectedValue(new Error("down"));
-    const { getByText } = render(<Home />);
+    const { getByText } = renderHome();
     await waitFor(() => expect(getByText(/tap to retry/i)).toBeTruthy());
   });
 
-  it("passes the chosen length to the story route", async () => {
+  it("Begin creates a persistent story and routes into its write page", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
-    const { getByText, getByPlaceholderText } = render(<Home />);
+    const { getByText, getByPlaceholderText, getByTestId } = renderHome();
     await waitFor(() => getByText("Fantasy Adventure"));
     fireEvent.press(getByText("Fantasy Adventure"));
     fireEvent.changeText(getByPlaceholderText(/premise/i), "a premise");
     fireEvent.press(getByText(/^Long$/));
     fireEvent.press(getByText(/begin the story/i));
+
+    // The story record carries what the route used to: template, length, premise.
+    expect(getByTestId("store-probe").props.children).toBe(
+      "fantasy|long|a premise"
+    );
     const { router } = require("expo-router");
-    expect(router.push).toHaveBeenCalledWith({
-      pathname: "/story",
-      params: { templateId: "fantasy", premise: "a premise", length: "long" },
-    });
+    expect(router.push).toHaveBeenCalledWith(
+      expect.stringMatching(/^\/story\/.+\/write$/)
+    );
+  });
+
+  it("lists saved stories and opens the hub on tap", async () => {
+    jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
+    const { getByText } = renderHome([savedStory()]);
+    await waitFor(() => getByText("Fantasy Adventure"));
+    expect(getByText("The lighthouse keeper's secret")).toBeTruthy();
+    expect(getByText("2 scenes")).toBeTruthy();
+    fireEvent.press(getByText("The lighthouse keeper's secret"));
+    const { router } = require("expo-router");
+    expect(router.push).toHaveBeenCalledWith("/story/saved-1");
   });
 
   it("mic fills the premise input with the spoken transcript", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
-    const { getByText, getByTestId, getByPlaceholderText } = render(<Home />);
+    const { getByText, getByTestId, getByPlaceholderText } = renderHome();
     await waitFor(() => getByText("Fantasy Adventure"));
     fireEvent.press(getByText("Fantasy Adventure"));
 
@@ -95,7 +149,7 @@ describe("Home", () => {
 
   it("Begin the story blesses audio for iOS (the session's first tap)", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
-    const { getByText, getByPlaceholderText } = render(<Home />);
+    const { getByText, getByPlaceholderText } = renderHome();
     await waitFor(() => getByText("Fantasy Adventure"));
     fireEvent.press(getByText("Fantasy Adventure"));
     fireEvent.changeText(getByPlaceholderText(/premise/i), "a premise");
@@ -105,7 +159,7 @@ describe("Home", () => {
 
   it("pressing the premise mic blesses audio for iOS", async () => {
     jest.spyOn(api, "getTemplates").mockResolvedValue(TEMPLATES);
-    const { getByText, getByTestId } = render(<Home />);
+    const { getByText, getByTestId } = renderHome();
     await waitFor(() => getByText("Fantasy Adventure"));
     fireEvent.press(getByText("Fantasy Adventure"));
     fireEvent(getByTestId("premise-mic"), "pressIn");
