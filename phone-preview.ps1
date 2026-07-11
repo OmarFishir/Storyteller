@@ -17,8 +17,25 @@ function Fail($msg) {
     exit 1
 }
 
-if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
-    Fail "cloudflared not found. Install: winget install --id Cloudflare.cloudflared (then open a fresh shell)"
+# Resolve cloudflared: PATH first, then the MSI's install locations. The
+# installer DOES add itself to the machine PATH, but already-running apps
+# (VS Code and every terminal inside it) keep the PATH they started with --
+# so right after installing, PATH lookup fails until the app restarts.
+# Falling back to the literal install paths makes that restart unnecessary.
+$cloudflared = $null
+$cfCmd = Get-Command cloudflared -ErrorAction SilentlyContinue
+if ($cfCmd) {
+    $cloudflared = $cfCmd.Source
+}
+else {
+    $cfCandidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe"),
+        (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe")
+    )
+    $cloudflared = $cfCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $cloudflared) {
+    Fail "cloudflared not found. Install: winget install --id Cloudflare.cloudflared"
 }
 
 $spawned = @()
@@ -26,7 +43,7 @@ $spawned = @()
 function Start-Tunnel($port) {
     $log = Join-Path $env:TEMP "cloudflared-$port.log"
     if (Test-Path $log) { Remove-Item $log -Force }
-    $p = Start-Process cloudflared -ArgumentList "tunnel", "--url", "http://localhost:$port" `
+    $p = Start-Process $script:cloudflared -ArgumentList "tunnel", "--url", "http://localhost:$port" `
         -RedirectStandardError $log -PassThru -WindowStyle Hidden
     $script:spawned += $p
     # cloudflared prints the quick-tunnel URL to stderr within a few seconds
