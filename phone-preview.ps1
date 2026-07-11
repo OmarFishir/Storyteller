@@ -105,7 +105,11 @@ try {
         Write-Host "(QR failed -- type the URL by hand, or: venv\Scripts\pip.exe install segno)"
     }
     Write-Host ""
-    Write-Host "Point the iPhone camera at the QR. Starting Expo (Ctrl+C here ends the session)..."
+    Write-Host "Point the iPhone camera at the QR ABOVE - it opens Safari, which is correct." -ForegroundColor Yellow
+    Write-Host "IGNORE the second QR Expo prints below: that one opens the Expo Go app," -ForegroundColor Yellow
+    Write-Host "which this preview does NOT use (wrong SDK prompt + no voice on native)." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Starting Expo (Ctrl+C here ends the session)..."
 
     # 5. Expo dev server, FOREGROUND -- its exit tears the session down
     Set-Location (Join-Path $root "client")
