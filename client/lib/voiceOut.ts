@@ -128,6 +128,7 @@ export function getVoiceOut(): VoiceOut {
       setSpeaking(false); // no fallback voice available; pipeline dies here
       return;
     }
+    const synth = g.speechSynthesis!; // capture once: protects late watchdog from torn-down global
     const utterance = new g.SpeechSynthesisUtterance!(text);
     let settled = false;
     utterance.onend = () => {
@@ -135,14 +136,15 @@ export function getVoiceOut(): VoiceOut {
       if (gen === generation) setSpeaking(false);
     };
     utterance.onerror = utterance.onend;
-    g.speechSynthesis!.speak(utterance);
+    synth.speak(utterance);
     // iOS drops a gesture-less speak() with NO event at all. If the engine
     // explicitly reports it is not speaking shortly after, flip the pipeline
     // off so the UI can't hang in "speaking". Only an explicit false counts —
     // an engine without a .speaking property gets the benefit of the doubt.
+    // The captured synth prevents a torn-down global from crashing late-firing timeouts.
     setTimeout(() => {
       if (settled || gen !== generation) return;
-      if (g.speechSynthesis!.speaking === false) setSpeaking(false);
+      if (synth.speaking === false) setSpeaking(false);
     }, SYNTH_WATCHDOG_MS);
   };
 
