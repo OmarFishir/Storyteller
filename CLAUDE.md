@@ -683,13 +683,18 @@ deviation from the original spec's `app/`).
   RNTL/React version triangle consistent; `client/.npmrc` sets
   `legacy-peer-deps=true` because `jest-expo@57`'s peer range still lags
   React Native 0.86 upstream. Remove both pins once upstream catches up.
-- Tests (jest-expo preset, `restoreMocks: true`, **98 tests** across 9
-  suites, up from 80 (96 before this final-review pass) — the delta is a new
-  `lib/__tests__/voiceOut.test.ts` suite plus a rewritten `voice.test.ts` for
-  the v2 record-then-transcribe engine and new narration cases in
-  `story.test.tsx`, plus two final-review additions: `voiceOut.test.ts`'s
-  speak()-flips-true-before-playback case and `story.test.tsx`'s
-  new-turn-silences-old-narration case): `lib/__tests__/sse.test.ts` (frame parsing incl.
+- Tests (jest-expo preset, `restoreMocks: true`, **116 tests** across 10
+  suites, up from 98 across 9 — the phone-preview slice's delta: a new
+  `components/__tests__/PushToTalk.test.tsx` suite pinning the 8s/15s
+  stuck-phase-timeout boundary, plus new `unlock()` / autoplay-rejection /
+  blob-revoke-on-natural-end / `speechSynthesis`-watchdog test blocks added
+  to `voiceOut.test.ts` (both described in full below; the audio-slice-era
+  delta that got the suite to 98/9 — a new `lib/__tests__/voiceOut.test.ts`
+  suite plus a rewritten `voice.test.ts` for the v2 record-then-transcribe
+  engine and new narration cases in `story.test.tsx`, plus two final-review
+  additions: `voiceOut.test.ts`'s speak()-flips-true-before-playback case
+  and `story.test.tsx`'s new-turn-silences-old-narration case — rides
+  unchanged below): `lib/__tests__/sse.test.ts` (frame parsing incl.
   chunk-split and separator-split cases, malformed JSON, unknown events, and
   — new — `reply_token`/`discussion_complete` parsing plus all three `route`
   intents, with an unrecognized route intent yielding `stream_error` rather
@@ -719,7 +724,18 @@ deviation from the original spec's `app/`).
   addition — `isSpeaking` flipping true SYNCHRONOUSLY at `speak()` time,
   before the `/narrate` fetch resolves, with a `stop()` in that window
   correctly staying `[true, false]` and the later-arriving stale response
-  never reviving it);
+  never reviving it; and, new for the phone-preview slice, an `unlock()`
+  block — blessing the shared element with a muted silent play inside the
+  tap, idempotence (a second `unlock()` doesn't play again), swallowing a
+  no-gesture rejection and retrying on the next call, no-oping without an
+  `Audio` global, the bless surviving across separate `getVoiceOut()`
+  instances (Home's tap, Story's later `speak()`), and never hijacking a
+  live narration when a post-rejection retry lands mid-playback — plus a
+  `speechSynthesis` watchdog block: flipping speaking false when the engine
+  silently never starts, NOT firing while the engine IS speaking, leaving
+  an engine with no `.speaking` property alone, a stale watchdog unable to
+  kill a newer utterance, and a natural `onend` before the watchdog window
+  staying settled with no double flip);
   `lib/__tests__/matchCard.test.ts` (SLIMMED to ordinals-only: guarded
   ordinals incl. "the last one" and out-of-bounds, bare ordinal words inside
   long sentences NOT matching, pick-verbs unlocking ordinals in longer
@@ -728,7 +744,10 @@ deviation from the original spec's `app/`).
   references like "tell me more about the iron door one" and "the door" all
   return `null` — i.e. route to `/converse` instead of being guessed as a
   pick); `components/__tests__/StreamingText.test.tsx` (append-only
-  rendering, paragraph breaks); `app/__tests__/index.test.tsx`
+  rendering, paragraph breaks); `components/__tests__/PushToTalk.test.tsx`
+  (NEW for the phone-preview slice: pins the stuck-phase timeout at its new
+  15s boundary — "transcribing…" still showing at 8s, an old failure would
+  have already recovered, and gone by 15s); `app/__tests__/index.test.tsx`
   (card-per-template, seed tap, load-failure retry, passing the chosen
   length to the story route, and the mic filling the premise input with the
   spoken transcript); `app/__tests__/story.test.tsx` (the story-turn block:
@@ -832,6 +851,67 @@ deviation from the original spec's `app/`).
   costs a fraction of a cent. Verified: backend 117/117 (`tests/test_audio.py`
   14 tests, up from 12), client 98/98 across 9 suites (up from 96); `npx tsc
   --noEmit` clean.
+- **Phone-in-hand preview slice** SHIPPED, commits `0cdd418`..`9421e45` (design:
+  `docs/superpowers/specs/2026-07-11-phone-preview-design.md`). Task 1 verified
+  LIVE, no code: `/continue/stream?mock=true` streams incrementally (62
+  `scene_token` frames, ~30ms apart) through a `cloudflared` quick tunnel —
+  Cloudflare's own docs claim quick tunnels don't support SSE, practice says
+  otherwise (`cloudflared` 2026.7.1 via winget). `lib/voiceOut.ts` was
+  reworked for iOS's autoplay policy, the phone's top risk: the persistent
+  `Audio` element and its `unlocked` bless flag now live at MODULE scope
+  (not inside `getVoiceOut()`'s per-call closure) so a bless earned on Home
+  survives into Story's later, separate `getVoiceOut()` call. New interface
+  method `unlock()` — idempotent, plays a muted silent WAV
+  (`SILENT_WAV`, a 2-sample data URI) synchronously inside a real tap to
+  bless the shared element, swallows its own no-gesture rejection so the
+  next tap simply retries, and never hijacks live playback (an `!el.paused`
+  guard added during the review loop). `speak()`'s `audio.play()` rejection
+  is now caught: it flips `isSpeaking` false and deliberately does NOT fall
+  back to `speechSynthesis` — on iOS that fallback is equally gesture-gated
+  and fails silently, which would hang "speaking" forever, so that one
+  utterance just goes unspoken while the story continues. The
+  `speechSynthesis` fallback path (a `/narrate` failure, or mock mode)
+  gained a `SYNTH_WATCHDOG_MS = 1500` watchdog: if, ~1.5s after a
+  gesture-less `speak()` call, the engine reports `speaking === false` (iOS
+  silently drops such calls with no event at all), the pipeline flips off;
+  a missing `.speaking` property gets the benefit of the doubt, and a
+  stale/settled generation's watchdog can't touch a newer utterance. The
+  blob URL is now also revoked on natural `onended` (closing the old
+  bounded-leak riding minor — previously only `stop()`/supersede revoked
+  it). Test-only export `__resetVoiceOutForTests()` resets the module-scoped
+  element/bless between tests. `unlock()` is wired at exactly four gesture
+  points: Story's option-card tap (`story.tsx`, inside the card
+  `Pressable`'s `onPress`, before `handleChoose`) and Story's `PushToTalk`
+  mic press (its `onActivate`, alongside the existing `voiceOut.stop()`),
+  plus Home's "Begin the story" button (`beginStory()`, before the route
+  push to `/story`) and Home's premise-box mic (`onActivate`) — deliberately
+  NOT inside `handleChoose` itself, since that function is also reached from
+  `/converse` `pick`/`steer` route frames, which aren't a user gesture.
+  `components/PushToTalk.tsx`'s stuck-phase timeout moved 8s → 15s (phone
+  networks plus `/transcribe`'s own retry backoff, up to ~7s, can
+  legitimately outrun 8s); a new suite,
+  `components/__tests__/PushToTalk.test.tsx`, pins both the
+  still-stuck-at-8s and recovered-by-15s boundary. `phone-preview.ps1`
+  (repo root) is the one-command session starter: starts the backend if
+  `:8000` isn't already listening, opens a `cloudflared` quick tunnel per
+  port (8000 backend, 8081 Expo), writes the backend tunnel URL into
+  `client/.env` as `EXPO_PUBLIC_API_URL` before Expo starts (Metro inlines
+  env vars at startup, so ordering matters — the script preserves any other
+  lines already in the file), prints the Expo tunnel URL as both plain text
+  and a terminal QR code via the pure-Python `segno` package (new
+  `requirements.txt` dep, dev-only) with `PYTHONIOENCODING=utf-8` forced for
+  the QR's block characters (Windows' default cp1252 console otherwise
+  silently degrades it to the text fallback), then runs `npx expo start
+  --port 8081` in the FOREGROUND so Ctrl+C ends the whole session — a
+  `finally` block force-stops every spawned process (backend, both tunnels)
+  best-effort. Verified live end-to-end through real tunnels; the
+  interactive Ctrl+C teardown path itself is NOT yet verified — rides to the
+  owner's first `phone-preview.ps1` session. `lib/voice.ts` needed ZERO
+  changes for this slice — iOS 18.4+'s `MediaRecorder` already records
+  `webm/opus`, the same container Chrome sends, confirmed against WebKit's
+  release notes at design time rather than assumed. Suite counts: backend
+  117 (untouched), client 116 across 10 suites (up from 98/9); `npx tsc
+  --noEmit` and `npx expo export --platform web` both clean.
 
 ## Environment / how to run
 
@@ -852,15 +932,22 @@ deviation from the original spec's `app/`).
 
 ## NEXT STEPS — follow the roadmap
 
-**NEXT UNIT OF WORK (owner directive, 2026-07-04): phone-in-hand preview.**
-The owner wants the current app working on their phone (PWA or similar — the
-browser route, NOT Expo Go native and NOT the app store, which is explicitly
-delayed) to see the design in hand and iterate from there. START at
-`docs/superpowers/notes/2026-07-04-phone-preview-handoff.md` — it carries the
-verified constraints (mic needs HTTPS — plain-LAN http silently kills voice;
-tunnel/static/full-deploy options; the no-auth backend must not go public
-bare; iOS autoplay risk) and the session-start checklist. First question to
-the owner: which phone OS? Then brainstorm → spec → plan as usual.
+**Phone-in-hand preview slice: SHIPPED, owner session pending.** Design:
+`docs/superpowers/specs/2026-07-11-phone-preview-design.md`; plan executed
+across commits `0cdd418`..`9421e45` on master (see "What's BUILT and
+WORKING" → "Client app" above for the full delta: the `voiceOut.ts` iOS
+autoplay rework, the four `unlock()` gesture points, `PushToTalk`'s 15s
+timeout, `phone-preview.ps1`). Before the owner's first live session: (1)
+flip to the Gemini **paid tier** (audio brings a full turn to ~4 Gemini
+calls, and the free daily cap has already cut off testing twice) and (2) set a
+Google Cloud **budget alert** so spend can't silently exceed the ~$20/month
+dev budget. Then run `.\phone-preview.ps1` from the repo root and work
+through the 9-step on-phone gut-check in the design spec's "Testing"
+section (silent-mode-off through watching `logs/usage.jsonl`) — this also
+closes out the audio slice's still-overdue mic-and-ear acceptance test.
+While there, confirm the one thing this slice couldn't verify itself:
+pressing Ctrl+C in the `phone-preview.ps1` window actually tears the
+session down (backend, both tunnels) cleanly.
 
 The approved phase plan lives in
 `docs/superpowers/specs/2026-07-02-voice-first-roadmap.md`. Summary:
