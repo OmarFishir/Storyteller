@@ -90,24 +90,27 @@ try {
     Write-Host "Tunneling the Expo dev server..."
     $clientUrl = Start-Tunnel 8081
 
-    # 4. The phone URL, as a QR code (plain text fallback if segno is missing)
+    # 4. The phone URL, as a QR code IMAGE opened in a viewer window. (v1
+    # rendered the QR in the terminal; a narrow window wraps/crops the block
+    # characters and the code won't scan -- a PNG always does. The URL text
+    # below is the manual fallback.)
     Write-Host ""
     Write-Host "  Phone URL: $clientUrl" -ForegroundColor Green
     Write-Host ""
-    # Force UTF-8 stdout for this call: segno's block characters don't fit in
-    # Windows' legacy ANSI codepage (cp1252 etc.), which Python falls back to
-    # whenever stdout isn't detected as a real console (e.g. redirected, or
-    # some terminal hosts) -- without this, the QR silently degrades to the
-    # text fallback below on a very common Windows default.
-    $env:PYTHONIOENCODING = "utf-8"
-    & (Join-Path $root "venv\Scripts\python.exe") -c "import segno; segno.make('$clientUrl').terminal(compact=True)"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "(QR failed -- type the URL by hand, or: venv\Scripts\pip.exe install segno)"
+    $qrPath = Join-Path $env:TEMP "storyteller-phone-qr.png"
+    & (Join-Path $root "venv\Scripts\python.exe") -c "import segno; segno.make('$clientUrl').save(r'$qrPath', scale=10, border=2)"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "QR opened in a window - point the iPhone camera at it."
+        Start-Process $qrPath
+    }
+    else {
+        Write-Host "(QR generation failed -- type the URL above into Safari by hand)"
     }
     Write-Host ""
-    Write-Host "Point the iPhone camera at the QR ABOVE - it opens Safari, which is correct." -ForegroundColor Yellow
-    Write-Host "IGNORE the second QR Expo prints below: that one opens the Expo Go app," -ForegroundColor Yellow
-    Write-Host "which this preview does NOT use (wrong SDK prompt + no voice on native)." -ForegroundColor Yellow
+    Write-Host "Scan the QR in the IMAGE WINDOW (or type the Phone URL into Safari)." -ForegroundColor Yellow
+    Write-Host "IGNORE the QR Expo prints in this terminal below: that one opens the" -ForegroundColor Yellow
+    Write-Host "Expo Go app, which this preview does NOT use (wrong SDK prompt + no" -ForegroundColor Yellow
+    Write-Host "voice on native)." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Starting Expo (Ctrl+C here ends the session)..."
 
