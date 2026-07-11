@@ -344,5 +344,34 @@ describe("getVoiceOut", () => {
       await jest.advanceTimersByTimeAsync(800); // ...First's watchdog fires now
       expect(states).toEqual([true, false, true]); // and must not touch Second
     });
+
+    it("a natural end before the watchdog stays settled — no double flip", async () => {
+      failNarrate();
+      mockSpeechSynthesis.speaking = false; // engine idle again after finishing
+      const out = getVoiceOut();
+      const states: boolean[] = [];
+      out.onSpeakingChange((s) => states.push(s));
+      out.speak("Quick utterance");
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(0);
+      // Fire the utterance's natural onend before the watchdog window closes.
+      const spoken = mockSpeechSynthesis.speak.mock.calls[0][0] as {
+        onend: (() => void) | null;
+      };
+      spoken.onend?.();
+      expect(states).toEqual([true, false]); // settled via onend callback
+      // Inject a successful /narrate mock so the second speak() doesn't create a watchdog.
+      jest.spyOn(require("../fetch"), "streamingFetch").mockRestore();
+      jest
+        .spyOn(require("../fetch"), "streamingFetch")
+        .mockResolvedValue(okWav());
+      out.speak("Next");
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(states).toEqual([true, false, true]); // new utterance flipped true
+      // First watchdog window closes; stale settled flag prevents it from killing the new utterance.
+      await jest.advanceTimersByTimeAsync(1500);
+      expect(states).toEqual([true, false, true]); // unchanged—settled guard saved it
+    });
   });
 });

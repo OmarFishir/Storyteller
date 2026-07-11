@@ -141,8 +141,8 @@ export function getVoiceOut(): VoiceOut {
     // off so the UI can't hang in "speaking". Only an explicit false counts —
     // an engine without a .speaking property gets the benefit of the doubt.
     setTimeout(() => {
-      if (settled || gen !== generation || !g.speechSynthesis) return;
-      if (g.speechSynthesis.speaking === false) setSpeaking(false);
+      if (settled || gen !== generation) return;
+      if (g.speechSynthesis!.speaking === false) setSpeaking(false);
     }, SYNTH_WATCHDOG_MS);
   };
 
