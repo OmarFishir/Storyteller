@@ -280,6 +280,12 @@ describe("Story", () => {
     jest.spyOn(api, "streamTurn").mockReturnValue(happyTurn());
     fireEvent.press(getByText("Force the iron door open now"));
     expect(mockVoiceOutFake.unlock).toHaveBeenCalled();
+    // Settle the follow-on turn the tap kicked off before the test returns —
+    // its trailing state updates otherwise land outside act() and warn (the
+    // same hazard the "PTT is disabled while a turn is streaming" test
+    // flushes). The tap consumes the old cards, so this only resolves once
+    // the SECOND turn's turn_complete re-renders them.
+    await waitFor(() => getByText("Ask the voice its name"));
   });
 
   it("pressing the mic blesses audio for iOS", async () => {
