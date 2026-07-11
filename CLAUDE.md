@@ -848,6 +848,16 @@ deviation from the original spec's `app/`).
 
 ## NEXT STEPS — follow the roadmap
 
+**NEXT UNIT OF WORK (owner directive, 2026-07-04): phone-in-hand preview.**
+The owner wants the current app working on their phone (PWA or similar — the
+browser route, NOT Expo Go native and NOT the app store, which is explicitly
+delayed) to see the design in hand and iterate from there. START at
+`docs/superpowers/notes/2026-07-04-phone-preview-handoff.md` — it carries the
+verified constraints (mic needs HTTPS — plain-LAN http silently kills voice;
+tunnel/static/full-deploy options; the no-auth backend must not go public
+bare; iOS autoplay risk) and the session-start checklist. First question to
+the owner: which phone OS? Then brainstorm → spec → plan as usual.
+
 The approved phase plan lives in
 `docs/superpowers/specs/2026-07-02-voice-first-roadmap.md`. Summary:
 
