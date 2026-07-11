@@ -190,12 +190,25 @@ export function getVoiceOut(): VoiceOut {
           audio.muted = false;
           audio.src = currentUrl;
           audio.onended = () => {
-            if (gen === generation) setSpeaking(false);
+            if (gen !== generation) return;
+            // Natural end: free the blob URL (previously a bounded leak —
+            // only stop()/supersede ever revoked it).
+            if (currentUrl && g.URL) {
+              g.URL.revokeObjectURL(currentUrl);
+              currentUrl = null;
+            }
+            setSpeaking(false);
           };
           audio.onerror = () => {
             if (gen === generation) deviceSpeak(text, gen);
           };
-          void audio.play();
+          Promise.resolve(audio.play()).catch(() => {
+            // Autoplay policy block: no tap traces to this play(). Do NOT
+            // fall back to the device voice — on iOS it's equally
+            // gesture-gated and fails SILENTLY, which would hang "speaking"
+            // forever. This utterance goes unspoken; the story continues.
+            if (gen === generation) setSpeaking(false);
+          });
         })
         .catch(() => {
           if (gen === generation) deviceSpeak(text, gen);

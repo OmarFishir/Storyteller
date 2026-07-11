@@ -170,6 +170,33 @@ describe("getVoiceOut", () => {
     expect(FakeAudio.instances[0].paused).toBe(false); // second is live
   });
 
+  it("an autoplay-blocked play() flips speaking false and does NOT fall back", async () => {
+    jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(okWav());
+    FakeAudio.playResult = Promise.reject(new Error("NotAllowedError"));
+    const out = getVoiceOut();
+    const states: boolean[] = [];
+    out.onSpeakingChange((s) => states.push(s));
+    out.speak("Blocked narration");
+    await flush();
+    await flush();
+    await flush();
+    expect(states).toEqual([true, false]); // the UI never hangs in "speaking"
+    // On iOS the device voice is equally gesture-gated and fails SILENTLY —
+    // falling back would hang forever, so it must not be attempted.
+    expect(mockSpeechSynthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("revokes the blob URL when playback ends naturally (leak fix)", async () => {
+    jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(okWav());
+    const out = getVoiceOut();
+    out.speak("Short scene.");
+    await flush();
+    await flush();
+    FakeAudio.instances[0].onended?.();
+    const g = globalThis as never as { URL: { revokeObjectURL: jest.Mock } };
+    expect(g.URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
+  });
+
   it("unavailable without any audio capability", () => {
     cleanupAudioGlobals();
     expect(getVoiceOut().available).toBe(false);
