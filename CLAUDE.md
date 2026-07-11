@@ -845,6 +845,10 @@ deviation from the original spec's `app/`).
   `EXPO_PUBLIC_USE_MOCK=1` to opt in).
 - Run client tests: `cd client && npx jest --watchAll=false`. Type-check:
   `cd client && npx tsc --noEmit`.
+- Phone preview session (tunnels + QR): `.\phone-preview.ps1` from the repo
+  root (needs `cloudflared`: `winget install --id Cloudflare.cloudflared`).
+  Writes the backend tunnel URL into `client/.env` each run; Ctrl+C ends the
+  whole session. Design: `docs/superpowers/specs/2026-07-11-phone-preview-design.md`.
 
 ## NEXT STEPS — follow the roadmap
 

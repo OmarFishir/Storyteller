@@ -4,3 +4,4 @@ python-dotenv
 google-genai
 pytest
 python-multipart
+segno
