@@ -82,7 +82,9 @@ export function PushToTalk({
     // Guard against a stuck "transcribing…" if the clip was empty (no
     // callback fires in that case).
     if (phaseTimeout.current) clearTimeout(phaseTimeout.current);
-    phaseTimeout.current = setTimeout(() => setPhase("idle"), 8000);
+    // 15s, not 8: phone networks + /transcribe's server-side retries (up to
+    // ~7s of backoff) can legitimately take that long before a callback.
+    phaseTimeout.current = setTimeout(() => setPhase("idle"), 15000);
   };
 
   return (
