@@ -18,7 +18,11 @@ class FakeAudio {
   play() {
     this.paused = false;
     this.playCalls.push({ src: this.src, muted: this.muted });
-    return FakeAudio.playResult;
+    const p = FakeAudio.playResult;
+    p.catch(() => {
+      this.paused = true; // a rejected play never started
+    });
+    return p;
   }
   pause() {
     this.paused = true;
@@ -270,6 +274,34 @@ describe("getVoiceOut", () => {
       expect(el.src).toBe("blob:fake"); // narration NOT hijacked
       expect(el.muted).toBe(false);
       expect(el.playCalls).toHaveLength(2); // silent attempt + narration only
+    });
+
+    it("an AbortError from our own stop() does not revoke the bless", async () => {
+      FakeAudio.playResult = Promise.reject(
+        Object.assign(new Error("interrupted"), { name: "AbortError" })
+      );
+      const out = getVoiceOut();
+      out.unlock(); // bless play() pending...
+      out.stop(); // ...interrupted by our own halt() in the same tick
+      await flush();
+      FakeAudio.playResult = Promise.resolve();
+      out.unlock(); // still blessed: must be a no-op, not a retry
+      expect(FakeAudio.instances[0].playCalls).toHaveLength(1);
+    });
+
+    it("an autoplay-rejected speak() leaves the element retryable by unlock()", async () => {
+      jest.spyOn(require("../fetch"), "streamingFetch").mockResolvedValue(okWav());
+      FakeAudio.playResult = Promise.reject(new Error("NotAllowedError"));
+      const out = getVoiceOut();
+      out.speak("Blocked narration"); // rejected: paused reverts to true (real-browser semantics)
+      await flush();
+      await flush();
+      await flush();
+      FakeAudio.playResult = Promise.resolve();
+      out.unlock(); // element is parked, so the bless must proceed
+      const el = FakeAudio.instances[0];
+      expect(el.playCalls.length).toBeGreaterThan(1); // narration attempt + bless
+      expect(el.playCalls[el.playCalls.length - 1].muted).toBe(true); // the bless
     });
   });
 

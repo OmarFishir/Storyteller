@@ -29,7 +29,12 @@ export type VoiceOut = {
   /** Bless the shared audio element for iOS autoplay. Call synchronously
    * from a real tap handler. Idempotent; harmless where not needed; its own
    * play() rejection (a no-gesture call) is swallowed and simply doesn't
-   * bless — the next tap retries. */
+   * bless — the next tap retries. Never blesses over live playback (a
+   * `!paused` element is a no-op — retried on a later tap). A self-inflicted
+   * `AbortError` — unlock() immediately followed by stop() in the same
+   * gesture tick, which is what Story's own tap handlers do — is NOT
+   * treated as a policy block: the gesture did reach play(), so the bless
+   * still stands. */
   unlock: () => void;
   onSpeakingChange: (cb: (speaking: boolean) => void) => void;
 };
@@ -166,7 +171,17 @@ export function getVoiceOut(): VoiceOut {
             el.muted = false;
           }
         },
-        () => {
+        (err) => {
+          if (err && (err as { name?: string }).name === "AbortError") {
+            // Our own halt() paused the element while the bless play() was
+            // still pending (Story taps call unlock() then stop() in one
+            // tick). The gesture DID invoke play() — the bless stands.
+            if (el.src === SILENT_WAV) {
+              el.pause();
+              el.muted = false;
+            }
+            return;
+          }
           // No gesture context: nothing was blessed. Swallowed on purpose —
           // the next tap's unlock() retries.
           unlocked = false;

@@ -863,10 +863,16 @@ deviation from the original spec's `app/`).
   survives into Story's later, separate `getVoiceOut()` call. New interface
   method `unlock()` — idempotent, plays a muted silent WAV
   (`SILENT_WAV`, a 2-sample data URI) synchronously inside a real tap to
-  bless the shared element, swallows its own no-gesture rejection so the
-  next tap simply retries, and never hijacks live playback (an `!el.paused`
-  guard added during the review loop). `speak()`'s `audio.play()` rejection
-  is now caught: it flips `isSpeaking` false and deliberately does NOT fall
+  bless the shared element, swallows a genuine no-gesture rejection so the
+  next tap simply retries (but treats a self-inflicted `AbortError` — its
+  own `stop()` interrupting the pending bless `play()` in the same gesture
+  tick, which is exactly what Story's tap handlers do — as a bless that
+  stands, not a policy block; a final-review fix, since misreading that
+  self-interruption as "no gesture" silently broke the bless whenever
+  Home's own unlock never ran first), and never hijacks live playback (an
+  `!el.paused` guard added during the review loop). `speak()`'s
+  `audio.play()` rejection is now caught: it flips `isSpeaking` false and
+  deliberately does NOT fall
   back to `speechSynthesis` — on iOS that fallback is equally gesture-gated
   and fails silently, which would hang "speaking" forever, so that one
   utterance just goes unspoken while the story continues. The
